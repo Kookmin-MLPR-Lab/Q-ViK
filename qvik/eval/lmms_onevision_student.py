@@ -32,7 +32,6 @@ from .prefill_mode import (
     normalize_prefill_mode,
     split_last_token,
 )
-from .text_kv_eviction import TextKVConfig, greedy_decode_with_text_eviction
 
 try:
     from lmms_eval import utils
@@ -97,11 +96,6 @@ class LmmsOnevisionStudent(lmms):
         attn_implementation: str = "sdpa",
         stats_output_dir: str = "",
         conv_template: str = "qwen_1_5",
-        text_eviction_mode: str = "none",
-        text_keep_ratio: float = 0.2,
-        text_cache_size: int = 0,
-        h2o_recent_ratio: float = 0.5,
-        streaming_sink_size: int = 4,
         prefill_mode: str = DEFAULT_PREFILL_MODE,
         **kwargs,
     ) -> None:
@@ -119,13 +113,6 @@ class LmmsOnevisionStudent(lmms):
         self.student = self.student.to(device=self._device, dtype=torch.float16).eval()
         self.keep_ratio = float(keep_ratio)
         self.stats_output_dir = stats_output_dir
-        self.text_kv_config = TextKVConfig(
-            mode=text_eviction_mode,
-            keep_ratio=float(text_keep_ratio),
-            cache_size=int(text_cache_size),
-            h2o_recent_ratio=float(h2o_recent_ratio),
-            streaming_sink_size=int(streaming_sink_size),
-        ).normalized()
         # "qvik" (default): first answer token from the compressed cache;
         # "origin": first answer token from the full prefill (see prefill_mode.py).
         self.prefill_mode = normalize_prefill_mode(prefill_mode)
@@ -261,11 +248,6 @@ class LmmsOnevisionStudent(lmms):
         summary = {
             "task": task_name,
             "keep_ratio": self.keep_ratio,
-            "text_eviction_mode": self.text_kv_config.mode,
-            "text_keep_ratio": self.text_kv_config.keep_ratio,
-            "text_cache_size": self.text_kv_config.cache_size,
-            "h2o_recent_ratio": self.text_kv_config.h2o_recent_ratio,
-            "streaming_sink_size": self.text_kv_config.streaming_sink_size,
             "n_samples": n,
             "prefill_mode": self.prefill_mode,
             "avg_image_token_ratio": sum(s["image_token_ratio"] for s in self._keep_stats) / n,
@@ -276,19 +258,6 @@ class LmmsOnevisionStudent(lmms):
             "avg_n_image_kept": sum(s["n_image_kept"] for s in self._keep_stats) / n,
             "samples": self._keep_stats,
         }
-        average_fields = {
-            "text_cache_budget": "avg_text_cache_budget",
-            "n_text_prompt_original": "avg_n_text_prompt_original",
-            "avg_n_text_prompt_kept_after_eviction": "avg_n_text_prompt_kept_after_eviction",
-            "text_prompt_keep_ratio_after_eviction": "avg_text_prompt_keep_ratio_after_eviction",
-            "avg_n_text_cache_final": "avg_n_text_cache_final",
-            "avg_n_visual_cache_final": "avg_n_visual_cache_final",
-            "text_eviction_events": "avg_text_eviction_events",
-        }
-        for sample_key, summary_key in average_fields.items():
-            summary[summary_key] = sum(
-                float(sample.get(sample_key, 0.0)) for sample in self._keep_stats
-            ) / n
         measured = [
             sample for sample in self._keep_stats
             if "decode_seconds" in sample
@@ -489,12 +458,6 @@ class LmmsOnevisionStudent(lmms):
             "n_image_original": n_img,
             "n_image_kept": n_keep,
             "n_text": n_text,
-            "n_text_prompt_original": n_text,
-            "avg_n_text_prompt_kept_after_eviction": float(n_text),
-            "text_prompt_keep_ratio_after_eviction": 1.0,
-            "avg_n_text_cache_final": float(n_text),
-            "avg_n_visual_cache_final": float(n_keep),
-            "text_eviction_events": 0,
             "prompt_len": prompt_len,
             "image_token_ratio": n_img / max(1, prompt_len),
             "text_token_ratio": n_text / max(1, prompt_len),
@@ -615,25 +578,11 @@ class LmmsOnevisionStudent(lmms):
         _cuda_sync(self._device)
         decode_start = time.perf_counter()
 
-        if self.text_kv_config.mode == "none":
-            answer_ids = greedy_decode_with_kv(
-                self._model, past_kv, next_token,
-                prompt_len=prompt_len,
-                eos_token_id=eos_token_id, max_new_tokens=max_new_tokens,
-            )
-        else:
-            answer_ids, text_stats = greedy_decode_with_text_eviction(
-                self._model,
-                past_kv,
-                next_token,
-                prompt_len=prompt_len,
-                image_positions=image_positions,
-                visual_keep_masks=keep_masks,
-                eos_token_id=eos_token_id,
-                max_new_tokens=max_new_tokens,
-                config=self.text_kv_config,
-            )
-            self._keep_stats[-1].update(text_stats)
+        answer_ids = greedy_decode_with_kv(
+            self._model, past_kv, next_token,
+            prompt_len=prompt_len,
+            eos_token_id=eos_token_id, max_new_tokens=max_new_tokens,
+        )
         _cuda_sync(self._device)
         decode_seconds = time.perf_counter() - decode_start
         decode_peak_allocated = (

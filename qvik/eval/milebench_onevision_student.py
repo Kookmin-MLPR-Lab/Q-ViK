@@ -97,15 +97,6 @@ def main():
         default=str(REPO_ROOT / "ckpts" / "student_onevision"),
     )
     parser.add_argument("--keep_ratio", type=float, default=0.5)
-    parser.add_argument(
-        "--text_eviction_mode",
-        choices=("none", "streamingllm", "h2o"),
-        default="none",
-    )
-    parser.add_argument("--text_keep_ratio", type=float, default=0.2)
-    parser.add_argument("--text_cache_size", type=int, default=0)
-    parser.add_argument("--h2o_recent_ratio", type=float, default=0.5)
-    parser.add_argument("--streaming_sink_size", type=int, default=4)
     parser.add_argument("--output_dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--data_root", default=DATA_ROOT)
     parser.add_argument("--log_root", default=LOG_ROOT)
@@ -145,8 +136,7 @@ def _run(args):
     print(
         f"[{args.dataset}] {len(samples)} samples (start_index={args.start_index}) "
         f"| keep_ratio={args.keep_ratio} "
-        f"keep_ratio_basis=image text_eviction={args.text_eviction_mode} "
-        f"text_keep_ratio={args.text_keep_ratio} max_new_tokens={args.max_new_tokens}"
+        f"keep_ratio_basis=image max_new_tokens={args.max_new_tokens}"
     )
 
     # Load student model (reuse existing class — no duplication)
@@ -157,11 +147,6 @@ def _run(args):
         keep_ratio=args.keep_ratio,
         device=args.device,
         stats_output_dir=task_out,
-        text_eviction_mode=args.text_eviction_mode,
-        text_keep_ratio=args.text_keep_ratio,
-        text_cache_size=args.text_cache_size,
-        h2o_recent_ratio=args.h2o_recent_ratio,
-        streaming_sink_size=args.streaming_sink_size,
     )
 
     predictions = []

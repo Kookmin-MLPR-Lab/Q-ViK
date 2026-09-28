@@ -52,7 +52,6 @@ _patch_torch_load_legacy_bin_mmap()
 from kvpress.presses.visual_utility_student import VisualUtilityStudent  # noqa: E402
 
 from .kv_decode_utils import (  # noqa: E402
-    SinkAbsorbPlan,
     greedy_decode_with_kv,
     trim_kv_cache_per_layer,
 )
@@ -62,15 +61,6 @@ from .prefill_mode import (  # noqa: E402
     feed_last_token,
     normalize_prefill_mode,
     split_last_token,
-)
-from .text_kv_eviction import (  # noqa: E402
-    TextKVConfig,
-    greedy_decode_with_text_eviction,
-)
-from .visual_sink_utils import (  # noqa: E402
-    VisualSinkDetection,
-    detect_visual_sinks,
-    topk_mask_with_optional_sink_filter,
 )
 
 from qvik.llava15.constants import DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX
@@ -118,25 +108,15 @@ def _infer_original_image_positions(
     return torch.tensor(image_positions, dtype=torch.long), cursor
 
 
-def _infer_raw_token_positions(
-    input_ids: torch.Tensor,
-    token_ids: list[int],
-    image_feature_len: int,
-) -> torch.Tensor:
-    if not token_ids:
-        return torch.empty(0, dtype=torch.long)
-    raw_ids = input_ids[0].detach().cpu().tolist()
-    targets = set(token_ids)
-    positions: list[int] = []
-    cursor = 0
-    for token_id in raw_ids:
-        if int(token_id) == IMAGE_TOKEN_INDEX:
-            cursor += image_feature_len
-            continue
-        if int(token_id) in targets:
-            positions.append(cursor)
-        cursor += 1
-    return torch.tensor(positions, dtype=torch.long)
+def topk_mask(scores: torch.Tensor, n_keep: int) -> torch.Tensor:
+    """Boolean mask over image tokens keeping the `n_keep` highest student scores."""
+    n = int(scores.numel())
+    if n_keep >= n:
+        return torch.ones(n, dtype=torch.bool)
+    top = torch.topk(scores.detach().cpu().float(), k=n_keep, largest=True).indices
+    keep = torch.zeros(n, dtype=torch.bool)
+    keep[top] = True
+    return keep
 
 
 def _decode_generated(
@@ -190,19 +170,6 @@ class LmmsLlava15Student(lmms):
         grid_h: int = 24,
         grid_w: int = 24,
         stats_output_dir: str = "",
-        sink_count: int = 0,
-        sink_init: str = "bos",
-        eviction_mode: str = "drop",
-        sink_absorb_scale: float = 1.0,
-        visual_sink_layer: int = 0,
-        visual_sink_threshold: float = 8.0,
-        visual_sink_max_ratio: float = 0.10,
-        visual_sink_measure_mass: bool | str = False,
-        text_eviction_mode: str = "none",
-        text_keep_ratio: float = 0.2,
-        text_cache_size: int = 0,
-        h2o_recent_ratio: float = 0.5,
-        streaming_sink_size: int = 4,
         prefill_mode: str = DEFAULT_PREFILL_MODE,
         hidden_state_offset: int | str | None = None,
         **kwargs,
@@ -265,24 +232,6 @@ class LmmsLlava15Student(lmms):
         self.grid_h = int(grid_h)
         self.grid_w = int(grid_w)
         self.stats_output_dir = stats_output_dir
-        self.sink_count = int(sink_count)
-        self.sink_init = sink_init
-        self.sink_token_ids: list[int] = []
-        self.eviction_mode = eviction_mode
-        self.sink_absorb_scale = float(sink_absorb_scale)
-        self.visual_sink_layer = int(visual_sink_layer)
-        self.visual_sink_threshold = float(visual_sink_threshold)
-        self.visual_sink_max_ratio = float(visual_sink_max_ratio)
-        self.visual_sink_measure_mass = str(visual_sink_measure_mass).lower() in {"1", "true", "yes", "on"}
-        self.text_kv_config = TextKVConfig(
-            mode=text_eviction_mode,
-            keep_ratio=float(text_keep_ratio),
-            cache_size=int(text_cache_size),
-            h2o_recent_ratio=float(h2o_recent_ratio),
-            streaming_sink_size=int(streaming_sink_size),
-        ).normalized()
-        if self.sink_count > 0:
-            self._attach_sink_tokens()
         # "qvik" (default): first answer token from the compressed cache;
         # "origin": first answer token from the full prefill (see prefill_mode.py).
         self.prefill_mode = normalize_prefill_mode(prefill_mode)
@@ -290,6 +239,9 @@ class LmmsLlava15Student(lmms):
         self._img_keep_sum = 0
         self._img_total_sum = 0
         self._img_sample_count = 0
+        # _record_keep_stats reads this on the first sample; without it the run
+        # dies with AttributeError before producing any output.
+        self._reported_keep_budget = False
         self._keep_stats: list[dict] = []
 
     @property
@@ -385,7 +337,6 @@ class LmmsLlava15Student(lmms):
                 IMAGE_TOKEN_INDEX,
                 return_tensors="pt",
             ).unsqueeze(0).to(self._device)
-            input_ids = self._insert_sink_token_ids(input_ids)
 
             output = self._generate_with_student(
                 input_ids=input_ids,
@@ -402,35 +353,6 @@ class LmmsLlava15Student(lmms):
         pbar.close()
         self._save_keep_stats(task_name)
         return res
-
-    def _attach_sink_tokens(self) -> None:
-        if self.sink_init != "bos":
-            raise ValueError(f"Unsupported sink_init={self.sink_init!r}; supported: 'bos'.")
-        tokens = [f"<sink_{idx}>" for idx in range(self.sink_count)]
-        self._tokenizer.add_tokens(tokens, special_tokens=True)
-        self._model.resize_token_embeddings(len(self._tokenizer))
-        sink_ids = [int(self._tokenizer.convert_tokens_to_ids(token)) for token in tokens]
-        bos_id = int(self._tokenizer.bos_token_id)
-        input_embeddings = self._model.get_input_embeddings().weight
-        output_embeddings = self._model.get_output_embeddings().weight
-        with torch.no_grad():
-            for token_id in sink_ids:
-                input_embeddings[token_id].copy_(input_embeddings[bos_id])
-                output_embeddings[token_id].copy_(output_embeddings[bos_id])
-        self.sink_token_ids = sink_ids
-        print(
-            f"[lmms-llava15-student] attached {self.sink_count} BOS-init sink token(s): {tokens}",
-            file=sys.stderr,
-            flush=True,
-        )
-
-    def _insert_sink_token_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        if not self.sink_token_ids:
-            return input_ids
-        sink = torch.tensor(self.sink_token_ids, dtype=input_ids.dtype, device=input_ids.device).unsqueeze(0)
-        if input_ids.shape[1] > 0 and int(input_ids[0, 0].item()) == int(self._tokenizer.bos_token_id):
-            return torch.cat([input_ids[:, :1], sink, input_ids[:, 1:]], dim=1)
-        return torch.cat([sink, input_ids], dim=1)
 
     def _build_prompt(self, context: str, visuals: list) -> str:
         question = context
@@ -467,16 +389,6 @@ class LmmsLlava15Student(lmms):
             "task": task_name,
             "keep_ratio": self.keep_ratio,
             "keep_ratio_basis": self.keep_ratio_basis,
-            "eviction_mode": self.eviction_mode,
-            "sink_count": self.sink_count,
-            "visual_sink_layer": self.visual_sink_layer,
-            "visual_sink_threshold": self.visual_sink_threshold,
-            "visual_sink_measure_mass": self.visual_sink_measure_mass,
-            "text_eviction_mode": self.text_kv_config.mode,
-            "text_keep_ratio": self.text_kv_config.keep_ratio,
-            "text_cache_size": self.text_kv_config.cache_size,
-            "h2o_recent_ratio": self.text_kv_config.h2o_recent_ratio,
-            "streaming_sink_size": self.text_kv_config.streaming_sink_size,
             "n_samples": n,
             "prefill_mode": self.prefill_mode,
             "avg_image_token_ratio": sum(s["image_token_ratio"] for s in self._keep_stats) / n,
@@ -487,29 +399,6 @@ class LmmsLlava15Student(lmms):
             "avg_n_image_kept": sum(s["n_image_kept"] for s in self._keep_stats) / n,
             "samples": self._keep_stats,
         }
-        average_fields = {
-            "n_visual_sink": "avg_n_visual_sink",
-            "visual_sink_ratio": "avg_visual_sink_ratio",
-            "visual_sink_score_mean": "avg_visual_sink_score_mean",
-            "visual_sink_score_max": "avg_visual_sink_score_max",
-            "visual_sink_keep_pollution": "avg_visual_sink_keep_pollution",
-            "visual_sink_kept_ratio": "avg_visual_sink_kept_ratio",
-            "visual_sink_mass_share": "avg_visual_sink_mass_share",
-            "visual_total_mass_share": "avg_visual_total_mass_share",
-            "visual_sink_mass_within_image": "avg_visual_sink_mass_within_image",
-            "visual_non_sink_mass_share": "avg_visual_non_sink_mass_share",
-            "text_cache_budget": "avg_text_cache_budget",
-            "n_text_prompt_original": "avg_n_text_prompt_original",
-            "avg_n_text_prompt_kept_after_eviction": "avg_n_text_prompt_kept_after_eviction",
-            "text_prompt_keep_ratio_after_eviction": "avg_text_prompt_keep_ratio_after_eviction",
-            "avg_n_text_cache_final": "avg_n_text_cache_final",
-            "avg_n_visual_cache_final": "avg_n_visual_cache_final",
-            "text_eviction_events": "avg_text_eviction_events",
-        }
-        for sample_key, summary_key in average_fields.items():
-            summary[summary_key] = sum(
-                float(sample.get(sample_key, 0.0)) for sample in self._keep_stats
-            ) / n
         out_dir = self.stats_output_dir or os.getcwd()
         os.makedirs(out_dir, exist_ok=True)
         fname = f"{task_name or 'unknown'}_keep_ratio_stats.json"
@@ -524,7 +413,6 @@ class LmmsLlava15Student(lmms):
             flush=True,
         )
 
-    @torch.no_grad()
     # The prefill below is a direct `self._model(...)` call, not HF `generate()`
     # (which carries its own @torch.no_grad()). Without this decorator autograd
     # retains every layer activation of the *uncompressed* prompt: measured 41.2
@@ -566,14 +454,8 @@ class LmmsLlava15Student(lmms):
                 prompt_ids=input_ids,
             )
 
-        visual_sink_modes = {"visual_sink_stats", "visual_sink_drop", "visual_sink_aware_topk"}
-        needs_prefill = image_tensor is not None and num_images > 0 and (
-            self.eviction_mode in visual_sink_modes
-            or self.keep_ratio < 1.0
-            or self.text_kv_config.mode != "none"
-        )
-        needs_student = self.eviction_mode in {"drop", "sink_absorb", "visual_sink_aware_topk"}
-        if not needs_prefill or (needs_student and self.student is None):
+        needs_prefill = image_tensor is not None and num_images > 0 and self.keep_ratio < 1.0
+        if not needs_prefill or self.student is None:
             return _safe_generate()
 
         # prefill_mode="qvik": prefill without the final prompt token, evict,
@@ -588,7 +470,7 @@ class LmmsLlava15Student(lmms):
                 images=image_tensor,
                 use_cache=True,
                 output_hidden_states=True,
-                output_attentions=self.visual_sink_measure_mass,
+                output_attentions=False,
                 return_dict=True,
             )
         except Exception as exc:
@@ -650,19 +532,6 @@ class LmmsLlava15Student(lmms):
         )
         image_idx_dev = image_positions.to(self._device)
         q_idx_dev = q_positions.to(self._device)
-        visual_detection = detect_visual_sinks(
-            H_all,
-            image_positions,
-            self.visual_sink_layer,
-            self.visual_sink_threshold,
-            self.visual_sink_max_ratio,
-        )
-        visual_sink_mass_stats = self._visual_sink_attention_stats(
-            prefill.attentions,
-            visual_detection,
-            image_positions,
-            q_positions,
-        )
         # Last use of `prefill`. Drop it now: `past_kv` and `H_all` are only
         # aliases into it, so while it lives the *uncompressed* KV cache, all 33
         # hidden-state tensors and the full [1, L, vocab] logits stay reachable
@@ -673,26 +542,7 @@ class LmmsLlava15Student(lmms):
         del prefill
 
         keep_masks: dict[int, torch.Tensor] = {}
-        drop_weights: dict[int, torch.Tensor] = {}
-        visual_sink_pollution: list[float] = []
-        visual_sink_kept_ratios: list[float] = []
-        layer_indices = self._eviction_layer_indices(past_kv)
-        if self.student is not None and self.eviction_mode != "visual_sink_drop":
-            layer_indices = list(self.student.layer_indices)
-        for layer_idx in layer_indices:
-            if self.eviction_mode == "visual_sink_stats":
-                continue
-            if self.eviction_mode == "visual_sink_drop":
-                image_keep = ~visual_detection.mask
-                mask = torch.ones(int(prompt_len), dtype=torch.bool)
-                mask[image_positions] = image_keep
-                keep_masks[layer_idx] = mask
-                weights = torch.zeros(int(prompt_len), dtype=torch.float32)
-                dropped = image_positions[~image_keep]
-                if dropped.numel() > 0:
-                    weights[dropped] = 1.0 / float(dropped.numel())
-                drop_weights[layer_idx] = weights
-                continue
+        for layer_idx in list(self.student.layer_indices):
             # hidden_states[l + offset]; the offset is part of the checkpoint
             # config (default 1 = output of layer l, as in the zap v1 trainer)
             # so it always matches what the student was trained on.
@@ -701,24 +551,8 @@ class LmmsLlava15Student(lmms):
             if n_keep >= n_img:
                 continue
             mask = torch.ones(int(prompt_len), dtype=torch.bool)
-            image_keep = topk_mask_with_optional_sink_filter(
-                scores,
-                n_keep,
-                visual_detection.mask,
-                self.eviction_mode == "visual_sink_aware_topk",
-            )
-            if visual_detection.mask.numel() == image_keep.numel():
-                visual_kept = int((image_keep & visual_detection.mask).sum().item())
-                visual_total = max(1, visual_detection.count)
-                visual_sink_pollution.append(visual_kept / max(1, int(image_keep.sum().item())))
-                visual_sink_kept_ratios.append(visual_kept / visual_total)
-            mask[image_positions] = image_keep
+            mask[image_positions] = topk_mask(scores, n_keep)
             keep_masks[layer_idx] = mask
-            weights = torch.zeros(int(prompt_len), dtype=torch.float32)
-            drop_image_positions = image_positions[~image_keep]
-            if drop_image_positions.numel() > 0:
-                weights[drop_image_positions] = torch.softmax(scores.detach().cpu()[~image_keep].float(), dim=0)
-            drop_weights[layer_idx] = weights
 
         actual_n_keep = self._actual_image_keep_count(n_img, keep_masks, image_positions)
         self._record_keep_stats(
@@ -726,71 +560,24 @@ class LmmsLlava15Student(lmms):
             n_text=n_text,
             prompt_len=int(prompt_len),
             n_keep=actual_n_keep,
-            visual_detection=visual_detection,
-            visual_sink_pollution=visual_sink_pollution,
-            visual_sink_kept_ratios=visual_sink_kept_ratios,
-            visual_sink_mass_stats=visual_sink_mass_stats,
         )
         del H_all
-        absorb_plan = self._sink_absorb_plan(prefill_ids, keep_masks, drop_weights)
-        past_kv = trim_kv_cache_per_layer(past_kv, keep_masks, absorb_plan)
+        past_kv = trim_kv_cache_per_layer(past_kv, keep_masks)
         if last_token_id is not None:
             past_kv, next_token, prompt_len = feed_last_token(
                 self._model, past_kv, last_token_id, prompt_len
             )
             keep_masks = extend_keep_masks(keep_masks)
-        if self.text_kv_config.mode == "none":
-            answer_ids = greedy_decode_with_kv(
-                self._model,
-                past_kv,
-                next_token,
-                prompt_len=int(prompt_len),
-                eos_token_id=eos_token_id,
-                max_new_tokens=max_new_tokens,
-            )
-        else:
-            answer_ids, text_stats = greedy_decode_with_text_eviction(
-                self._model,
-                past_kv,
-                next_token,
-                prompt_len=int(prompt_len),
-                image_positions=image_positions,
-                visual_keep_masks=keep_masks,
-                eos_token_id=eos_token_id,
-                max_new_tokens=max_new_tokens,
-                config=self.text_kv_config,
-            )
-            self._keep_stats[-1].update(text_stats)
+        answer_ids = greedy_decode_with_kv(
+            self._model,
+            past_kv,
+            next_token,
+            prompt_len=int(prompt_len),
+            eos_token_id=eos_token_id,
+            max_new_tokens=max_new_tokens,
+        )
         torch.cuda.empty_cache()
         return self._tokenizer.decode(answer_ids.tolist(), skip_special_tokens=True).strip()
-
-    def _sink_absorb_plan(
-        self,
-        input_ids: torch.Tensor,
-        keep_masks: dict[int, torch.Tensor],
-        drop_weights: dict[int, torch.Tensor],
-    ) -> SinkAbsorbPlan | None:
-        if self.eviction_mode != "sink_absorb" or not self.sink_token_ids:
-            return None
-        sink_positions = _infer_raw_token_positions(
-            input_ids,
-            self.sink_token_ids,
-            self.image_feature_len,
-        )
-        if sink_positions.numel() == 0:
-            return None
-        return SinkAbsorbPlan(
-            sink_positions={layer_idx: sink_positions for layer_idx in keep_masks},
-            drop_weights=drop_weights,
-            value_scale=self.sink_absorb_scale,
-        )
-
-    def _eviction_layer_indices(self, past_kv) -> list[int]:
-        if hasattr(past_kv, "key_cache"):
-            return list(range(len(past_kv.key_cache)))
-        if hasattr(past_kv, "layers"):
-            return list(range(len(past_kv.layers)))
-        return list(range(len(past_kv)))
 
     def _actual_image_keep_count(
         self,
@@ -803,43 +590,6 @@ class LmmsLlava15Student(lmms):
         first_mask = next(iter(keep_masks.values()))
         return int(first_mask[image_positions].sum().item())
 
-    def _visual_sink_attention_stats(
-        self,
-        attentions,
-        visual_detection: VisualSinkDetection,
-        image_positions: torch.Tensor,
-        q_positions: torch.Tensor,
-    ) -> dict[str, float]:
-        empty = {
-            "visual_sink_mass_share": 0.0,
-            "visual_total_mass_share": 0.0,
-            "visual_sink_mass_within_image": 0.0,
-            "visual_non_sink_mass_share": 0.0,
-        }
-        if not self.visual_sink_measure_mass or attentions is None or len(attentions) == 0:
-            return empty
-        if image_positions.numel() == 0 or q_positions.numel() == 0:
-            return empty
-        attention_idx = min(max(int(visual_detection.layer_index) - 1, 0), len(attentions) - 1)
-        attn = attentions[attention_idx]
-        if attn is None:
-            return empty
-        attn = attn.detach().float()[0]
-        q_idx = q_positions.to(attn.device)
-        image_idx = image_positions.to(attn.device)
-        query_attn = attn.index_select(dim=1, index=q_idx)
-        visual_mass = query_attn.index_select(dim=2, index=image_idx).sum(dim=-1).mean().item()
-        sink_mass = 0.0
-        if visual_detection.count > 0:
-            sink_positions = image_positions[visual_detection.mask].to(attn.device)
-            sink_mass = query_attn.index_select(dim=2, index=sink_positions).sum(dim=-1).mean().item()
-        return {
-            "visual_sink_mass_share": float(sink_mass),
-            "visual_total_mass_share": float(visual_mass),
-            "visual_sink_mass_within_image": float(sink_mass / visual_mass) if visual_mass > 0 else 0.0,
-            "visual_non_sink_mass_share": float(max(0.0, visual_mass - sink_mass)),
-        }
-
     def _record_keep_stats(
         self,
         *,
@@ -847,17 +597,10 @@ class LmmsLlava15Student(lmms):
         n_text: int,
         prompt_len: int,
         n_keep: int,
-        visual_detection: VisualSinkDetection,
-        visual_sink_pollution: list[float],
-        visual_sink_kept_ratios: list[float],
-        visual_sink_mass_stats: dict[str, float],
     ) -> None:
         self._img_keep_sum += n_keep
         self._img_total_sum += n_img
         self._img_sample_count += 1
-        visual_scores = visual_detection.scores
-        visual_mask = visual_detection.mask
-        selected_scores = visual_scores[visual_mask] if visual_detection.count > 0 else visual_scores[:0]
         self._keep_stats.append(
             {
                 "n_image_original": n_img,
@@ -868,27 +611,13 @@ class LmmsLlava15Student(lmms):
                 "text_token_ratio": n_text / max(1, prompt_len),
                 "total_keep_ratio": (n_text + n_keep) / max(1, prompt_len),
                 "image_keep_ratio": n_keep / max(1, n_img),
-                "n_visual_sink": visual_detection.count,
-                "visual_sink_ratio": visual_detection.ratio,
-                "visual_sink_layer_resolved": visual_detection.layer_index,
-                "visual_sink_score_mean": float(selected_scores.mean().item()) if selected_scores.numel() else 0.0,
-                "visual_sink_score_max": float(visual_scores.max().item()) if visual_scores.numel() else 0.0,
-                "visual_sink_keep_pollution": (
-                    sum(visual_sink_pollution) / len(visual_sink_pollution) if visual_sink_pollution else 0.0
-                ),
-                "visual_sink_kept_ratio": (
-                    sum(visual_sink_kept_ratios) / len(visual_sink_kept_ratios) if visual_sink_kept_ratios else 0.0
-                ),
-                **visual_sink_mass_stats,
             }
         )
         if not self._reported_keep_budget:
             print(
-                f"[lmms-llava15-student] mode={self.eviction_mode} "
-                f"keep_ratio_basis={self.keep_ratio_basis} "
+                f"[lmms-llava15-student] keep_ratio_basis={self.keep_ratio_basis} "
                 f"keep_ratio={self.keep_ratio} prompt_len={prompt_len} image_tokens={n_img} "
-                f"text_tokens={n_text} image_tokens_kept={n_keep} "
-                f"visual_sinks={visual_detection.count}",
+                f"text_tokens={n_text} image_tokens_kept={n_keep}",
                 file=sys.stderr,
                 flush=True,
             )
