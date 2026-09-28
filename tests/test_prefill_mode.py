@@ -7,47 +7,25 @@ import torch
 from transformers import DynamicCache
 
 from kvpress.presses.visual_utility_student import VisualUtilityStudent
-from qvik.eval import delayed_replay as dr
+from qvik.eval import prefill_mode as pm
 from qvik.eval.text_kv_eviction import TextKVCacheManager, TextKVConfig
 
 
-@pytest.fixture(autouse=True)
-def _no_env_override(monkeypatch):
-    monkeypatch.delenv(dr.ENV_VAR, raising=False)
+def test_prefill_mode_values() -> None:
+    assert pm.normalize_prefill_mode(None) == "qvik"
+    assert pm.normalize_prefill_mode("ORIGIN") == "origin"
+    with pytest.raises(ValueError):
+        pm.normalize_prefill_mode("other")
 
 
-def test_default_tasks_cover_short_answer_benchmarks() -> None:
-    tasks = dr.parse_replay_tasks(None)
-    for task in (
-        "pope_offline",
-        "mme_offline",
-        "gqa_offline",
-        "scienceqa_img_offline",
-        "mmbench_en_dev_offline",
-        "vqav2_test_s3_offline",
-        "vqav2_testdev_offline",
-    ):
-        assert dr.should_replay(task, tasks), task
-    for task in ("textvqa_offline", "chartqa_offline", "coco_cap_offline", "mmerealworld"):
-        assert not dr.should_replay(task, tasks), task
-
-
-def test_pipe_separator_env_override_and_none(monkeypatch) -> None:
-    assert dr.parse_replay_tasks("pope|gqa") == {"pope", "gqa"}
-    assert dr.parse_replay_tasks("none") == frozenset()
-    monkeypatch.setenv(dr.ENV_VAR, "all")
-    tasks = dr.parse_replay_tasks("pope")
-    assert dr.should_replay("chartqa_offline", tasks)
-
-
-def test_split_held_out_token() -> None:
+def test_split_last_token() -> None:
     ids = torch.tensor([[1, 2, 3, 4]])
-    prefill, held = dr.split_held_out_token(ids, True)
-    assert prefill.tolist() == [[1, 2, 3]] and held.tolist() == [[4]]
-    prefill, held = dr.split_held_out_token(ids, False)
-    assert prefill is ids and held is None
-    prefill, held = dr.split_held_out_token(ids[:, :1], True)
-    assert held is None
+    prefill, last = pm.split_last_token(ids, "qvik")
+    assert prefill.tolist() == [[1, 2, 3]] and last.tolist() == [[4]]
+    prefill, last = pm.split_last_token(ids, "origin")
+    assert prefill is ids and last is None
+    prefill, last = pm.split_last_token(ids[:, :1], "qvik")
+    assert last is None
 
 
 class _FakeOut:
@@ -67,23 +45,23 @@ class _FakeModel:
         return _FakeOut(logits, past_key_values + 1)
 
 
-def test_replay_uses_absolute_position_of_held_out_token() -> None:
+def test_last_token_uses_its_absolute_position() -> None:
     model = _FakeModel()
-    past, nxt, new_len = dr.replay_held_out_token(model, 0, torch.tensor([[5]]), prompt_len=42)
+    past, nxt, new_len = pm.feed_last_token(model, 0, torch.tensor([[5]]), prompt_len=42)
     assert model.calls == [(5, 42, 42)]
     assert past == 1 and int(nxt.item()) == 7 and new_len == 43
 
 
-def test_extended_masks_match_text_manager_layout_after_replay() -> None:
-    # 3 text, 4 image, 2 text = prompt of 9 (last text token held out -> prefill of 9).
+def test_extended_masks_match_text_manager_layout() -> None:
+    # 3 text, 4 image, 2 text = prompt of 9 before the final token is fed.
     prompt_len = 9
     image_positions = torch.arange(3, 7)
     mask = torch.ones(prompt_len, dtype=torch.bool)
     mask[torch.tensor([4, 6])] = False
     masks = {0: mask, 1: mask.clone()}
-    ext = dr.extend_keep_masks_for_replay(masks)
+    ext = pm.extend_keep_masks(masks)
     assert all(m.shape[0] == prompt_len + 1 and bool(m[-1]) for m in ext.values())
-    kept = int(ext[0].sum())  # trimmed prompt + replayed token
+    kept = int(ext[0].sum())  # trimmed prompt + final prompt token
     cache = DynamicCache()
     for layer_idx in range(2):
         cache.update(torch.zeros(1, 2, kept, 4), torch.zeros(1, 2, kept, 4), layer_idx)
@@ -98,7 +76,7 @@ def test_extended_masks_match_text_manager_layout_after_replay() -> None:
     for layer_types in manager.token_types.values():
         assert layer_types.shape[-1] == kept
 
-    # Without the extension the layout disagrees with the post-replay cache.
+    # Without the extension the layout disagrees with the cache.
     with pytest.raises((IndexError, RuntimeError, ValueError)):
         TextKVCacheManager(
             cache,

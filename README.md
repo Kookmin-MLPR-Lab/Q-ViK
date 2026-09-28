@@ -146,31 +146,22 @@ for ds in ALFRED CLEVR-Change IEdit Spot-the-Diff; do
 done
 ```
 
-### Delayed replay (evict before the first answer token)
+### Prefill mode (how the first answer token is produced)
 
-Q-ViK prefills the full prompt and trims the visual KVs afterwards. Without
-extra care, the first generated token still comes from the full-attention
-prefill. On short-answer / multiple-choice benchmarks that token is often the
-whole answer, so accuracy barely depends on `keep_ratio`.
+`prefill_mode` in `--model_args` applies to every task in both wrappers
+(`qvik/eval/prefill_mode.py`):
 
-For these task families both wrappers hold out the final prompt token, prefill
-the rest, evict, and then replay the held-out token through the trimmed cache
-(`qvik/eval/delayed_replay.py`). The first answer token then sees only the
-kept visual KVs. Default families:
+- `prefill_mode=qvik` (default): prefill the prompt without its final token,
+  evict visual KVs, then feed the final prompt token through the compressed
+  cache. The first answer token therefore sees only the kept visual KVs.
+- `prefill_mode=origin`: prefill the full prompt, take the first answer token
+  from that full-attention pass, then evict. This is the usual post-prefill
+  KV-eviction protocol. On short-answer / multiple-choice benchmarks the first
+  token is often the whole answer, so this mode barely depends on `keep_ratio`.
 
-`mme, pope, mmstar, vizwiz_vqa, gqa, scienceqa_img, mmbench, vqav2, seedbench`
-
-A family also matches its sub-tasks (`vqav2` → `vqav2_test_s3`, `mmbench` →
-`mmbench_en_dev`). Override with `delayed_replay_tasks=pope|gqa` in
-`--model_args` (use `|`, since lmms-eval splits model args on commas), with
-`delayed_replay_tasks=all` / `none`, or with the env var
-`QVIK_DELAYED_REPLAY_TASKS`. The wrapper prints one
-`task=... delayed_replay=True/False` line per task, and the stats JSON records
-`delayed_replay_samples`.
-
-Note that text tokens after the image were still computed with full image
-attention during prefill, so their KVs carry visual information even after
-the image KVs are evicted.
+The stats JSON records `prefill_mode`. In both modes, text tokens after the
+image were computed with full image attention during prefill, so their KVs
+still carry visual information after the image KVs are evicted.
 
 ### Keep-ratio basis
 

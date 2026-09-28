@@ -56,14 +56,12 @@ from .kv_decode_utils import (  # noqa: E402
     greedy_decode_with_kv,
     trim_kv_cache_per_layer,
 )
-from .delayed_replay import (  # noqa: E402
-    DEFAULT_DELAYED_REPLAY_TASKS,
-    extend_keep_masks_for_replay,
-    parse_replay_tasks,
-    replay_held_out_token,
-    should_replay,
-    split_held_out_token,
-    task_family,
+from .prefill_mode import (  # noqa: E402
+    DEFAULT_PREFILL_MODE,
+    extend_keep_masks,
+    feed_last_token,
+    normalize_prefill_mode,
+    split_last_token,
 )
 from .text_kv_eviction import (  # noqa: E402
     TextKVConfig,
@@ -205,7 +203,7 @@ class LmmsLlava15Student(lmms):
         text_cache_size: int = 0,
         h2o_recent_ratio: float = 0.5,
         streaming_sink_size: int = 4,
-        delayed_replay_tasks: str = DEFAULT_DELAYED_REPLAY_TASKS,
+        prefill_mode: str = DEFAULT_PREFILL_MODE,
         hidden_state_offset: int | str | None = None,
         **kwargs,
     ) -> None:
@@ -285,15 +283,10 @@ class LmmsLlava15Student(lmms):
         ).normalized()
         if self.sink_count > 0:
             self._attach_sink_tokens()
-        # Task families whose first answer token must come from the
-        # post-eviction cache (see qvik/eval/delayed_replay.py). lmms-eval
-        # splits --model_args on commas, so use "|" as the separator; the
-        # QVIK_DELAYED_REPLAY_TASKS env var overrides the whole list.
-        self.delayed_replay_tasks = parse_replay_tasks(delayed_replay_tasks)
-        self._rank = 0
-        self._world_size = 1
-        self._reported_keep_budget = False
-        self._reported_replay_tasks: set[str] = set()
+        # "qvik" (default): first answer token from the compressed cache;
+        # "origin": first answer token from the full prefill (see prefill_mode.py).
+        self.prefill_mode = normalize_prefill_mode(prefill_mode)
+        print(f"[lmms-llava15-student] prefill_mode={self.prefill_mode}", file=sys.stderr, flush=True)
         self._img_keep_sum = 0
         self._img_total_sum = 0
         self._img_sample_count = 0
@@ -394,25 +387,12 @@ class LmmsLlava15Student(lmms):
             ).unsqueeze(0).to(self._device)
             input_ids = self._insert_sink_token_ids(input_ids)
 
-            family = task_family(task)
-            delayed_replay = should_replay(task, self.delayed_replay_tasks)
-            if family not in self._reported_replay_tasks:
-                self._reported_replay_tasks.add(family)
-                print(
-                    f"[lmms-llava15-student] task={task} family={family} "
-                    f"delayed_replay={delayed_replay} "
-                    f"(configured={sorted(self.delayed_replay_tasks)})",
-                    file=sys.stderr,
-                    flush=True,
-                )
-
             output = self._generate_with_student(
                 input_ids=input_ids,
                 image_tensor=image_tensor,
                 image_sizes=image_sizes,
                 num_images=len(flattened_visuals),
                 max_new_tokens=max_new_tokens,
-                delayed_replay=delayed_replay,
             )
             res.append(output)
             self.cache_hook.add_partial("generate_until", (contexts[0], gen_kwargs), output)
@@ -498,7 +478,7 @@ class LmmsLlava15Student(lmms):
             "h2o_recent_ratio": self.text_kv_config.h2o_recent_ratio,
             "streaming_sink_size": self.text_kv_config.streaming_sink_size,
             "n_samples": n,
-            "delayed_replay_samples": sum(bool(x.get("delayed_replay")) for x in self._keep_stats),
+            "prefill_mode": self.prefill_mode,
             "avg_image_token_ratio": sum(s["image_token_ratio"] for s in self._keep_stats) / n,
             "avg_text_token_ratio": sum(s["text_token_ratio"] for s in self._keep_stats) / n,
             "avg_total_keep_ratio": sum(s["total_keep_ratio"] for s in self._keep_stats) / n,
@@ -560,7 +540,6 @@ class LmmsLlava15Student(lmms):
         image_sizes: list,
         num_images: int,
         max_new_tokens: int,
-        delayed_replay: bool = False,
     ) -> str:
         eos_token_id = _resolve_eos_token_id(self._tokenizer, self._model.config)
         pad_token_id = self._tokenizer.pad_token_id or eos_token_id
@@ -597,14 +576,11 @@ class LmmsLlava15Student(lmms):
         if not needs_prefill or (needs_student and self.student is None):
             return _safe_generate()
 
-        # Delayed replay: hold out the last prompt token so eviction (below)
-        # fires on the truncated prefill, then replay the held-out token
-        # through the *trimmed* cache before generating anything. Without
-        # this, `next_token` below comes from the full, uncompressed prefill
-        # attention -- which is fine for long-form generation but makes
-        # short-answer/multiple-choice accuracy insensitive to keep_ratio,
-        # since the whole answer is often that one token.
-        prefill_ids, held_out_id = split_held_out_token(input_ids, delayed_replay)
+        # prefill_mode="qvik": prefill without the final prompt token, evict,
+        # then feed that token through the compressed cache so the first
+        # answer token sees only the kept visual KVs. "origin" prefills the
+        # full prompt and takes the first token before eviction.
+        prefill_ids, last_token_id = split_last_token(input_ids, self.prefill_mode)
 
         try:
             prefill = self._model(
@@ -634,9 +610,9 @@ class LmmsLlava15Student(lmms):
             )
         except ValueError:
             fallback_prompt_len = int(H_all[-1].shape[1])
-            if held_out_id is not None:
-                past_kv, next_token, fallback_prompt_len = replay_held_out_token(
-                    self._model, past_kv, held_out_id, fallback_prompt_len
+            if last_token_id is not None:
+                past_kv, next_token, fallback_prompt_len = feed_last_token(
+                    self._model, past_kv, last_token_id, fallback_prompt_len
                 )
             answer_ids = greedy_decode_with_kv(
                 self._model,
@@ -755,15 +731,14 @@ class LmmsLlava15Student(lmms):
             visual_sink_kept_ratios=visual_sink_kept_ratios,
             visual_sink_mass_stats=visual_sink_mass_stats,
         )
-        self._keep_stats[-1]["delayed_replay"] = held_out_id is not None
         del H_all
         absorb_plan = self._sink_absorb_plan(prefill_ids, keep_masks, drop_weights)
         past_kv = trim_kv_cache_per_layer(past_kv, keep_masks, absorb_plan)
-        if held_out_id is not None:
-            past_kv, next_token, prompt_len = replay_held_out_token(
-                self._model, past_kv, held_out_id, prompt_len
+        if last_token_id is not None:
+            past_kv, next_token, prompt_len = feed_last_token(
+                self._model, past_kv, last_token_id, prompt_len
             )
-            keep_masks = extend_keep_masks_for_replay(keep_masks)
+            keep_masks = extend_keep_masks(keep_masks)
         if self.text_kv_config.mode == "none":
             answer_ids = greedy_decode_with_kv(
                 self._model,
