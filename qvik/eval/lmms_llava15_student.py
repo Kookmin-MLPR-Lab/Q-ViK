@@ -206,6 +206,7 @@ class LmmsLlava15Student(lmms):
         h2o_recent_ratio: float = 0.5,
         streaming_sink_size: int = 4,
         delayed_replay_tasks: str = DEFAULT_DELAYED_REPLAY_TASKS,
+        hidden_state_offset: int | str | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -244,6 +245,15 @@ class LmmsLlava15Student(lmms):
         if student_path:
             self.student = VisualUtilityStudent.from_pretrained(student_path)
             self.student = self.student.to(device=self._device, dtype=self._model_dtype).eval()
+            if hidden_state_offset not in (None, ""):
+                # Override for checkpoints whose training index is not recorded.
+                self.student.hidden_state_offset = int(hidden_state_offset)
+            print(
+                f"[lmms-llava15-student] student={student_path} "
+                f"hidden_state_offset={self.student.hidden_state_offset}",
+                file=sys.stderr,
+                flush=True,
+            )
         else:
             self.student = None
         self.student_path = student_path

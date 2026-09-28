@@ -340,6 +340,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val-ratio", type=float, default=0.1)
     parser.add_argument("--log-every", type=int, default=25)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--overwrite", action="store_true", help="Replace an existing checkpoint in --output-dir.")
     parser.add_argument("--student-variant", choices=["full", "mlp_only", "cnn_only"], default="full")
     parser.add_argument("--conv-dim", type=int, default=256)
     parser.add_argument("--proj-dim", type=int, default=256)
@@ -366,6 +367,10 @@ def main() -> int:
 
     device = torch.device(args.device)
     out_dir = Path(args.output_dir)
+    if (out_dir / "pytorch_model.bin").exists() and not args.overwrite:
+        raise SystemExit(
+            f"{out_dir} already holds a checkpoint; pass --overwrite to replace it."
+        )
     out_dir.mkdir(parents=True, exist_ok=True)
     log_f = (out_dir / "train_log.jsonl").open("w")
     (out_dir / "train_config.json").write_text(json.dumps(vars(args), indent=2))

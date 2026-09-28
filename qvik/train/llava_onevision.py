@@ -143,6 +143,7 @@ def main() -> int:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--output-dir", required=True)
+    p.add_argument("--overwrite", action="store_true", help="Replace an existing checkpoint in --output-dir.")
     p.add_argument("--val-ratio", type=float, default=0.1)
     p.add_argument("--log-every", type=int, default=50)
     p.add_argument("--student-variant", choices=["full", "mlp_only", "cnn_only"], default="full")
@@ -159,6 +160,10 @@ def main() -> int:
 
     device = torch.device(args.device)
     out_dir = Path(args.output_dir)
+    if (out_dir / "pytorch_model.bin").exists() and not args.overwrite:
+        raise SystemExit(
+            f"{out_dir} already holds a checkpoint; pass --overwrite to replace it."
+        )
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / "train_log.jsonl"
     log_f = log_path.open("w")

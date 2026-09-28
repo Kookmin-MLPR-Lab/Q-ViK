@@ -4,5 +4,9 @@ __pycache__/
 results/
 logs/
 model
-data
-ckpts
+data/eval
+data/train/gqa
+data/train/scienceqa
+data/train/textvqa
+data/train/teacher/
+ckpts/

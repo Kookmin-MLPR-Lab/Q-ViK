@@ -96,13 +96,13 @@ python qvik/train/llava_onevision.py \
   --teacher-root data/train/teacher/llava_onevision \
   --llava-path model/llava-onevision-qwen2-7b-ov \
   --epochs 20 \
-  --output-dir ckpts/student_onevision
+  --output-dir ckpts/qvik_student_onevision
 
 # LLaVA-1.5
 python qvik/train/llava15.py \
   --teacher-root data/train/teacher/llava15 \
   --epochs 20 \
-  --output-dir ckpts/student_llava15
+  --output-dir ckpts/qvik_student_llava15
 ```
 
 The LLaVA-1.5 student scores decoder layer `l` from `hidden_states[l + offset]`
@@ -179,9 +179,11 @@ the image KVs are evicted.
 - **OneVision:** `keep_ratio` is the fraction of image tokens kept.
 - **LLaVA-1.5, default `keep_ratio_basis=total`:** `keep_ratio` is the kept
   fraction of the whole prompt, with text always kept. Therefore
-  `n_keep = max(1, n_img - (1 - keep_ratio) * prompt_len)`. For a typical
-  576-image-token prompt, any `keep_ratio` below roughly 0.85–0.9 keeps a
-  single image token.
+  `n_keep = max(1, n_img - (1 - keep_ratio) * prompt_len)`. Once `keep_ratio`
+  is at or below the prompt's text fraction (`n_text / prompt_len`), only one
+  image token survives. For example, the text fraction is about 0.08 on POPE
+  and about 0.19 on ScienceQA-IMG, so keep 0.05 keeps 1 of 576 image tokens on
+  both.
 - **LLaVA-1.5, `keep_ratio_basis=image`:** keeps `ceil(keep_ratio * n_img)`
   image tokens, the same meaning as OneVision.
 
