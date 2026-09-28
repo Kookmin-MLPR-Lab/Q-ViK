@@ -10,3 +10,4 @@ data/train/scienceqa
 data/train/textvqa
 data/train/teacher/
 ckpts/
+/data
