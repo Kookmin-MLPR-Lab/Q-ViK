@@ -28,7 +28,7 @@ import torch
 from PIL import Image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-WORKSPACE_ROOT = PROJECT_ROOT.parent
+WORKSPACE_ROOT = PROJECT_ROOT  # model/ and data/ live inside the project
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from qvik.teacher.answer_correctness import is_correct_prediction
@@ -581,7 +581,7 @@ def load_textvqa_samples(
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--model", default=str(WORKSPACE_ROOT / "models/llava-v1.5-7b"))
+    p.add_argument("--model", default=str(WORKSPACE_ROOT / "model/llava-v1.5-7b"))
     p.add_argument(
         "--dataset",
         required=True,

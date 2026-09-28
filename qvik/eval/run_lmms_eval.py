@@ -63,7 +63,14 @@ os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
 # via `include:` and only override the dataset location. Datasets that ship only
 # the eval split locally use the parquet/arrow builder with explicit data_files
 # so HF doesn't try to infer a (missing) train/test split layout.
-DATA_ROOT = Path(os.environ.get("QVIK_EVAL_DATA_ROOT", ZAP_ROOT.parent / "data/eval"))
+def _default_eval_root() -> Path:
+    for candidate in (ZAP_ROOT / "data/eval", ZAP_ROOT.parent / "data/eval"):
+        if candidate.is_dir():
+            return candidate
+    return ZAP_ROOT / "data/eval"
+
+
+DATA_ROOT = Path(os.environ.get("QVIK_EVAL_DATA_ROOT", _default_eval_root()))
 LOCAL_TASKS = {
     "textvqa": {
         "base": "textvqa/textvqa_val.yaml",

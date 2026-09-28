@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+import math
 
 import torch
 
@@ -497,6 +498,68 @@ class TextKVCacheManager:
         }
 
 
+class DecodeAttentionProbe:
+    """Record fp32 attention probabilities of the single decode query per layer.
+
+    Requesting `output_attentions=True` makes HF fall back from SDPA to eager
+    attention, which computes QK^T in the model dtype. LLaVA-OneVision (Qwen2)
+    overflows there in fp16 -- one layer goes non-finite and every logit is NaN,
+    so greedy decoding emits token 0 ("!") forever. This probe keeps SDPA for the
+    real forward pass and recomputes the one-row probabilities in fp32 from the
+    post-update cache keys. With a single query at the end of the sequence no
+    causal mask is needed.
+    """
+
+    def __init__(self, model) -> None:
+        backbone = getattr(model, "model", model)
+        layers = getattr(backbone, "layers", None)
+        if layers is None:
+            raise RuntimeError("H2O probe expects model.model.layers (Llama/Qwen2 decoder).")
+        self.probs: list[torch.Tensor | None] = [None] * len(layers)
+        self._handles = [
+            layer.self_attn.register_forward_hook(self._hook(idx), with_kwargs=True)
+            for idx, layer in enumerate(layers)
+        ]
+
+    def _hook(self, idx: int):
+        def hook(module, args, kwargs, output):
+            hidden = kwargs.get("hidden_states", args[0] if args else None)
+            position_embeddings = kwargs.get("position_embeddings")
+            cache = kwargs.get("past_key_value")
+            if hidden is None or position_embeddings is None or cache is None:
+                raise RuntimeError(
+                    "H2O probe needs hidden_states, position_embeddings and "
+                    "past_key_value passed to self_attn as keyword arguments."
+                )
+            bsz, q_len, _ = hidden.shape
+            if q_len != 1:
+                raise RuntimeError(f"H2O probe expects one decode query, got {q_len}.")
+            query = module.q_proj(hidden).view(bsz, q_len, module.num_heads, module.head_dim)
+            query = query.transpose(1, 2).float()
+            cos, sin = (t.float().unsqueeze(1) for t in position_embeddings)
+            query = query * cos + _rotate_half(query) * sin
+            keys = cache.key_cache[module.layer_idx].float()
+            groups = int(module.num_heads) // int(keys.shape[1])
+            if groups > 1:
+                keys = keys.repeat_interleave(groups, dim=1)
+            scores = torch.matmul(query, keys.transpose(2, 3)) / math.sqrt(module.head_dim)
+            self.probs[idx] = torch.softmax(scores, dim=-1)
+
+        return hook
+
+    def attentions(self) -> tuple[torch.Tensor, ...]:
+        if any(prob is None for prob in self.probs):
+            raise RuntimeError("H2O probe did not capture every layer in this step.")
+        probs = tuple(self.probs)  # type: ignore[arg-type]
+        self.probs = [None] * len(self.probs)
+        return probs
+
+    def close(self) -> None:
+        for handle in self._handles:
+            handle.remove()
+        self._handles = []
+
+
 @torch.no_grad()
 def greedy_decode_with_text_eviction(
     model,
@@ -542,31 +605,36 @@ def greedy_decode_with_text_eviction(
     )
     device = next_token.device
     cache_pos = torch.zeros(1, dtype=torch.long, device=device)
-    for _ in range(max_new_tokens - 1):
-        cache_pos[0] = pos
-        out = model(
-            input_ids=next_token,
-            past_key_values=past_kv,
-            cache_position=cache_pos,
-            position_ids=cache_pos.unsqueeze(0),
-            use_cache=True,
-            output_attentions=config.mode == "h2o",
-            return_dict=True,
-        )
-        past_kv = out.past_key_values
-        manager.append_generated_token(pos)
-        if config.mode == "h2o":
-            manager.update_h2o_scores(out.attentions, past_kv)
-        past_kv = manager.prune(past_kv, rotary_emb=rotary_emb)
+    probe = DecodeAttentionProbe(model) if config.mode == "h2o" else None
+    try:
+        for _ in range(max_new_tokens - 1):
+            cache_pos[0] = pos
+            out = model(
+                input_ids=next_token,
+                past_key_values=past_kv,
+                cache_position=cache_pos,
+                position_ids=cache_pos.unsqueeze(0),
+                use_cache=True,
+                output_attentions=False,
+                return_dict=True,
+            )
+            past_kv = out.past_key_values
+            manager.append_generated_token(pos)
+            if probe is not None:
+                manager.update_h2o_scores(probe.attentions(), past_kv)
+            past_kv = manager.prune(past_kv, rotary_emb=rotary_emb)
 
-        next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-        token = int(next_token.item())
-        out_tokens.append(token)
-        pos = (
-            manager.next_streaming_position()
-            if config.mode == "streamingllm"
-            else pos + 1
-        )
-        if token == eos_token_id:
-            break
+            next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            token = int(next_token.item())
+            out_tokens.append(token)
+            pos = (
+                manager.next_streaming_position()
+                if config.mode == "streamingllm"
+                else pos + 1
+            )
+            if token == eos_token_id:
+                break
+    finally:
+        if probe is not None:
+            probe.close()
     return torch.tensor(out_tokens, dtype=torch.long), manager.stats()

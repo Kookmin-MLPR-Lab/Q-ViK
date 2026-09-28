@@ -26,7 +26,7 @@ from PIL import Image
 from tqdm import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-WORKSPACE_ROOT = REPO_ROOT.parent
+WORKSPACE_ROOT = REPO_ROOT  # model/ and data/ live inside the project
 sys.path.insert(0, str(REPO_ROOT))
 
 DATA_ROOT = str(WORKSPACE_ROOT / "data" / "eval" / "MileBench")
@@ -90,7 +90,7 @@ def main():
     parser.add_argument("--dataset", required=True)
     parser.add_argument(
         "--pretrained",
-        default=str(WORKSPACE_ROOT / "models" / "llava-onevision-qwen2-7b-ov"),
+        default=str(WORKSPACE_ROOT / "model" / "llava-onevision-qwen2-7b-ov"),
     )
     parser.add_argument(
         "--student_path",

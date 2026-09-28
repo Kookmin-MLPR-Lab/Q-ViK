@@ -17,7 +17,7 @@ done
 python - <<'PY'
 from pathlib import Path
 
-root = Path.cwd().parent / "data/train/teacher/llava15"
+root = Path.cwd() / "data/train/teacher/llava15"
 counts = {
     dataset: len(list((root / dataset).glob("*.pt")))
     for dataset in ("scienceqa", "textvqa", "gqa")

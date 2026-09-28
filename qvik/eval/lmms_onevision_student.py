@@ -25,6 +25,15 @@ if REPO_ROOT not in sys.path:
 
 from kvpress.presses.visual_utility_student_onevision import VisualUtilityStudentOneVision
 from .kv_decode_utils import greedy_decode_with_kv, trim_kv_cache_per_layer
+from .delayed_replay import (
+    DEFAULT_DELAYED_REPLAY_TASKS,
+    extend_keep_masks_for_replay,
+    parse_replay_tasks,
+    replay_held_out_token,
+    should_replay,
+    split_held_out_token,
+    task_family,
+)
 from .text_kv_eviction import TextKVConfig, greedy_decode_with_text_eviction
 
 try:
@@ -82,8 +91,8 @@ class LmmsOnevisionStudent(lmms):
 
     def __init__(
         self,
-        pretrained: str = "/workspace/zap/model/llava-onevision-qwen2-7b-ov",
-        student_path: str = "/workspace/zap/ckpts/student_onevision_A_ep20",
+        pretrained: str = str(Path(REPO_ROOT) / "model/llava-onevision-qwen2-7b-ov"),
+        student_path: str = str(Path(REPO_ROOT) / "ckpts/student_onevision"),
         keep_ratio: float = 0.5,
         device: str = "cuda:0",
         batch_size: int = 1,
@@ -95,6 +104,7 @@ class LmmsOnevisionStudent(lmms):
         text_cache_size: int = 0,
         h2o_recent_ratio: float = 0.5,
         streaming_sink_size: int = 4,
+        delayed_replay_tasks: str = DEFAULT_DELAYED_REPLAY_TASKS,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -118,6 +128,10 @@ class LmmsOnevisionStudent(lmms):
             h2o_recent_ratio=float(h2o_recent_ratio),
             streaming_sink_size=int(streaming_sink_size),
         ).normalized()
+        # Task families whose first answer token must come from the
+        # post-eviction cache (see qvik/eval/delayed_replay.py).
+        self.delayed_replay_tasks = parse_replay_tasks(delayed_replay_tasks)
+        self._reported_replay_tasks: set[str] = set()
         self._reported_keep_budget = False
         self._img_keep_sum = 0
         self._img_total_sum = 0
@@ -223,6 +237,17 @@ class LmmsOnevisionStudent(lmms):
             split = split[0]
             if task_name is None:
                 task_name = task
+            family = task_family(task)
+            delayed_replay = should_replay(task, self.delayed_replay_tasks)
+            if family not in self._reported_replay_tasks:
+                self._reported_replay_tasks.add(family)
+                print(
+                    f"[lmms-onevision-student] task={task} family={family} "
+                    f"delayed_replay={delayed_replay} "
+                    f"(configured={sorted(self.delayed_replay_tasks)})",
+                    file=sys.stderr,
+                    flush=True,
+                )
             visuals = [doc_to_visual[0](self.task_dict[task][split][ids]) for ids in doc_id]
             visuals = [img for sublist in visuals for img in sublist]  # flatten
 
@@ -232,7 +257,9 @@ class LmmsOnevisionStudent(lmms):
 
             context = contexts[0]
 
-            output = self._generate_llava(context, visuals, max_new_tokens)
+            output = self._generate_llava(
+                context, visuals, max_new_tokens, delayed_replay=delayed_replay
+            )
             res.append(output)
             self.cache_hook.add_partial("generate_until", (context, gen_kwargs), output)
             pbar.update(1)
@@ -255,6 +282,7 @@ class LmmsOnevisionStudent(lmms):
             "h2o_recent_ratio": self.text_kv_config.h2o_recent_ratio,
             "streaming_sink_size": self.text_kv_config.streaming_sink_size,
             "n_samples": n,
+            "delayed_replay_samples": sum(bool(x.get("delayed_replay")) for x in self._keep_stats),
             "avg_image_token_ratio": sum(s["image_token_ratio"] for s in self._keep_stats) / n,
             "avg_text_token_ratio": sum(s["text_token_ratio"] for s in self._keep_stats) / n,
             "avg_total_keep_ratio": sum(s["total_keep_ratio"] for s in self._keep_stats) / n,
@@ -358,7 +386,13 @@ class LmmsOnevisionStudent(lmms):
         )
 
     @torch.no_grad()
-    def _generate_llava(self, context: str, visuals, max_new_tokens: int) -> str:
+    def _generate_llava(
+        self,
+        context: str,
+        visuals,
+        max_new_tokens: int,
+        delayed_replay: bool = False,
+    ) -> str:
         """Generation path for LLaVA-format checkpoint (llava-onevision-qwen2-7b-ov)."""
         from qvik.llava_onevision.conversation import conv_templates
         from qvik.llava_onevision.constants import (
@@ -411,6 +445,13 @@ class LmmsOnevisionStudent(lmms):
             except Exception as e:
                 print(f"[lmms-onevision-student] LLAVA fallback failed ({e})", file=sys.stderr, flush=True)
                 return ""
+
+        # Delayed replay: prefill everything but the final prompt token, evict,
+        # then replay that token through the trimmed cache so the first answer
+        # token already sees only the kept visual KVs. Everything below works
+        # on the truncated prompt, so positions and masks stay consistent.
+        input_ids, held_out_id = split_held_out_token(input_ids, delayed_replay)
+        attention_mask = attention_mask[:, : input_ids.shape[1]]
 
         # Process images
         image_tensor = self._llava_process_images(visuals, self._image_processor, self._config)
@@ -566,6 +607,12 @@ class LmmsOnevisionStudent(lmms):
         del layer_scores, prefill, last_logits, inputs_embeds, image_tensor
         past_kv = trim_kv_cache_per_layer(past_kv, keep_masks)
         kv_cache_prompt_bytes = _kv_cache_nbytes(past_kv)
+        if held_out_id is not None:
+            past_kv, next_token, prompt_len = replay_held_out_token(
+                self._model, past_kv, held_out_id, prompt_len
+            )
+            keep_masks = extend_keep_masks_for_replay(keep_masks)
+            self._keep_stats[-1]["delayed_replay"] = True
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         _cuda_sync(self._device)

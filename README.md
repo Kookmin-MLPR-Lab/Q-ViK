@@ -81,6 +81,12 @@ for ds in textvqa gqa scienceqa; do
 done
 ```
 
+The LLaVA-1.5 teacher defaults to a 50/50 mix of question→image and
+answer→image attention, saved only when the model's answer is correct
+(`--question-weight 0.5 --require-correct`). The released zap checkpoints were
+trained on the answer-only teacher without the correctness filter; reproduce
+that with `--question-weight 0 --no-require-correct`.
+
 ### 2. Student training
 
 
@@ -99,6 +105,12 @@ python qvik/train/llava15.py \
   --output-dir ckpts/student_llava15
 ```
 
+The LLaVA-1.5 student scores decoder layer `l` from `hidden_states[l + offset]`
+(`--hidden-state-offset`, default 1 = output of layer `l`). The offset is saved
+in the checkpoint's `config.json` and read back at inference, so training,
+validation and evaluation always use the same index. Checkpoints without the
+field are loaded with offset 1. OneVision always uses offset 1.
+
 ### 3. Evaluation
 
 
@@ -109,7 +121,7 @@ Results are written to `results/<model_tag>/<task>/`. Available tasks: `textvqa`
 ```bash
 python qvik/eval/run_lmms_eval.py \
   --model lmms_llava15_student \
-  --model_args pretrained=model/llava-v1.5-7b,student_path=ckpts/student_llava15,keep_ratio=0.5,device=cuda:0 \
+  --model_args pretrained=model/llava-v1.5-7b,student_path=ckpts/v1/student_llava15_orig_vflow_1800_lr1e4_e15,keep_ratio=0.5,device=cuda:0 \
   --tasks textvqa,chartqa,docvqa,gqa,coco_cap,nocaps,textcaps \
   --batch_size 1 \
   --output_path results
@@ -136,6 +148,43 @@ for ds in ALFRED CLEVR-Change IEdit Spot-the-Diff; do
 done
 ```
 
+### Delayed replay (evict before the first answer token)
+
+Q-ViK prefills the full prompt and trims the visual KVs afterwards. Without
+extra care, the first generated token still comes from the full-attention
+prefill. On short-answer / multiple-choice benchmarks that token is often the
+whole answer, so accuracy barely depends on `keep_ratio`.
+
+For these task families both wrappers hold out the final prompt token, prefill
+the rest, evict, and then replay the held-out token through the trimmed cache
+(`qvik/eval/delayed_replay.py`). The first answer token then sees only the
+kept visual KVs. Default families:
+
+`mme, pope, mmstar, vizwiz_vqa, gqa, scienceqa_img, mmbench, vqav2, seedbench`
+
+A family also matches its sub-tasks (`vqav2` → `vqav2_test_s3`, `mmbench` →
+`mmbench_en_dev`). Override with `delayed_replay_tasks=pope|gqa` in
+`--model_args` (use `|`, since lmms-eval splits model args on commas), with
+`delayed_replay_tasks=all` / `none`, or with the env var
+`QVIK_DELAYED_REPLAY_TASKS`. The wrapper prints one
+`task=... delayed_replay=True/False` line per task, and the stats JSON records
+`delayed_replay_samples`.
+
+Note that text tokens after the image were still computed with full image
+attention during prefill, so their KVs carry visual information even after
+the image KVs are evicted.
+
+### Keep-ratio basis
+
+- **OneVision:** `keep_ratio` is the fraction of image tokens kept.
+- **LLaVA-1.5, default `keep_ratio_basis=total`:** `keep_ratio` is the kept
+  fraction of the whole prompt, with text always kept. Therefore
+  `n_keep = max(1, n_img - (1 - keep_ratio) * prompt_len)`. For a typical
+  576-image-token prompt, any `keep_ratio` below roughly 0.85–0.9 keeps a
+  single image token.
+- **LLaVA-1.5, `keep_ratio_basis=image`:** keeps `ceil(keep_ratio * n_img)`
+  image tokens, the same meaning as OneVision.
+
 ### Sequential Q-ViK + text KV eviction
 
 The LLaVA-1.5 and OneVision evaluation wrappers can apply a second, text-only
@@ -146,7 +195,10 @@ always protected by the second stage.
 - `text_eviction_mode=streamingllm`: keep initial text sinks plus recent text.
 - `text_eviction_mode=h2o`: keep per-head attention heavy hitters plus recent
   text. Scores are accumulated from decode queries instead of materializing the
-  quadratic prefill attention matrix.
+  quadratic prefill attention matrix. The decode-query probabilities are
+  recomputed in fp32 by a hook (`DecodeAttentionProbe`), so the model keeps
+  running on SDPA. Requesting `output_attentions=True` would fall back to eager
+  fp16 attention, which overflows on OneVision/Qwen2 and produces NaN logits.
 - `text_cache_size=N`: fixed number of text KV entries (overrides the ratio).
 - `text_keep_ratio=0.2`: text budget as a fraction of prompt text when the
   fixed size is zero.
@@ -160,7 +212,7 @@ H2O with a 20% total text cache (10% heavy hitters + 10% recent):
 ```bash
 NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 python qvik/eval/run_lmms_eval.py \
   --model lmms_llava15_student \
-  --model_args pretrained=model/llava-v1.5-7b,student_path=ckpts/student_llava15,keep_ratio=0.5,keep_ratio_basis=image,text_eviction_mode=h2o,text_keep_ratio=0.2,h2o_recent_ratio=0.5,device=cuda:0 \
+  --model_args pretrained=model/llava-v1.5-7b,student_path=ckpts/v1/student_llava15_orig_vflow_1800_lr1e4_e15,keep_ratio=0.5,keep_ratio_basis=image,text_eviction_mode=h2o,text_keep_ratio=0.2,h2o_recent_ratio=0.5,device=cuda:0 \
   --tasks textvqa,chartqa,docvqa,gqa \
   --batch_size 1 \
   --output_path results/qvik_h2o

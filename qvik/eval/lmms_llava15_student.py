@@ -56,6 +56,15 @@ from .kv_decode_utils import (  # noqa: E402
     greedy_decode_with_kv,
     trim_kv_cache_per_layer,
 )
+from .delayed_replay import (  # noqa: E402
+    DEFAULT_DELAYED_REPLAY_TASKS,
+    extend_keep_masks_for_replay,
+    parse_replay_tasks,
+    replay_held_out_token,
+    should_replay,
+    split_held_out_token,
+    task_family,
+)
 from .text_kv_eviction import (  # noqa: E402
     TextKVConfig,
     greedy_decode_with_text_eviction,
@@ -167,8 +176,8 @@ class LmmsLlava15Student(lmms):
 
     def __init__(
         self,
-        pretrained: str = "/workspace/zap/model/llava-v1.5-7b",
-        student_path: str = "/workspace/zap/ckpts/student_llava15_900_e15",
+        pretrained: str = str(ZAP_ROOT / "model/llava-v1.5-7b"),
+        student_path: str = str(ZAP_ROOT / "ckpts/v1/student_llava15_orig_vflow_1800_lr1e4_e15"),
         vision_tower_path: str = "",
         keep_ratio: float = 0.5,
         keep_ratio_basis: str = "total",
@@ -196,7 +205,7 @@ class LmmsLlava15Student(lmms):
         text_cache_size: int = 0,
         h2o_recent_ratio: float = 0.5,
         streaming_sink_size: int = 4,
-        delayed_replay_tasks: str = "mme,pope,mmstar,vizwiz_vqa,gqa",
+        delayed_replay_tasks: str = DEFAULT_DELAYED_REPLAY_TASKS,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -266,23 +275,11 @@ class LmmsLlava15Student(lmms):
         ).normalized()
         if self.sink_count > 0:
             self._attach_sink_tokens()
-        # Task families (matched against the "<name>_offline"/"<name>_local"
-        # task id lmms-eval assigns) where the first generated token should
-        # come from the *post-eviction* cache instead of the model's ordinary
-        # full-attention prefill. Without this, the whole answer is often
-        # that one token, so short-answer/multiple-choice accuracy is
-        # insensitive to keep_ratio -- see _generate_with_student_replay.
-        # lmms-eval splits --model_args on commas, so a comma-separated value
-        # can't survive the CLI; accept "|" as an alternative separator and let
-        # an env var override the whole list.
-        delayed_replay_tasks = os.environ.get(
-            "QVIK_DELAYED_REPLAY_TASKS", delayed_replay_tasks
-        )
-        self.delayed_replay_tasks = {
-            name.strip()
-            for name in delayed_replay_tasks.replace("|", ",").split(",")
-            if name.strip()
-        }
+        # Task families whose first answer token must come from the
+        # post-eviction cache (see qvik/eval/delayed_replay.py). lmms-eval
+        # splits --model_args on commas, so use "|" as the separator; the
+        # QVIK_DELAYED_REPLAY_TASKS env var overrides the whole list.
+        self.delayed_replay_tasks = parse_replay_tasks(delayed_replay_tasks)
         self._rank = 0
         self._world_size = 1
         self._reported_keep_budget = False
@@ -387,16 +384,12 @@ class LmmsLlava15Student(lmms):
             ).unsqueeze(0).to(self._device)
             input_ids = self._insert_sink_token_ids(input_ids)
 
-            task_family = task
-            for suffix in ("_offline", "_local", "_lite"):
-                if task_family.endswith(suffix):
-                    task_family = task_family[: -len(suffix)]
-                    break
-            delayed_replay = task_family in self.delayed_replay_tasks
-            if task_family not in self._reported_replay_tasks:
-                self._reported_replay_tasks.add(task_family)
+            family = task_family(task)
+            delayed_replay = should_replay(task, self.delayed_replay_tasks)
+            if family not in self._reported_replay_tasks:
+                self._reported_replay_tasks.add(family)
                 print(
-                    f"[lmms-llava15-student] task={task} family={task_family} "
+                    f"[lmms-llava15-student] task={task} family={family} "
                     f"delayed_replay={delayed_replay} "
                     f"(configured={sorted(self.delayed_replay_tasks)})",
                     file=sys.stderr,
@@ -495,6 +488,7 @@ class LmmsLlava15Student(lmms):
             "h2o_recent_ratio": self.text_kv_config.h2o_recent_ratio,
             "streaming_sink_size": self.text_kv_config.streaming_sink_size,
             "n_samples": n,
+            "delayed_replay_samples": sum(bool(x.get("delayed_replay")) for x in self._keep_stats),
             "avg_image_token_ratio": sum(s["image_token_ratio"] for s in self._keep_stats) / n,
             "avg_text_token_ratio": sum(s["text_token_ratio"] for s in self._keep_stats) / n,
             "avg_total_keep_ratio": sum(s["total_keep_ratio"] for s in self._keep_stats) / n,
@@ -541,33 +535,6 @@ class LmmsLlava15Student(lmms):
         )
 
     @torch.no_grad()
-    def _replay_held_out_token(
-        self,
-        past_kv,
-        held_out_id: torch.Tensor,
-        prompt_len: int,
-    ) -> tuple:
-        """Feed the held-out last prompt token through the trimmed cache.
-
-        ``held_out_id`` is guaranteed to be a plain text token (the eviction
-        mask never touches it), so this is a normal text-only forward step --
-        same call shape as ``kv_decode_utils.greedy_decode_with_kv``'s
-        continuation steps, just for position ``prompt_len`` instead of
-        ``prompt_len + i``.
-        """
-        cache_pos = torch.tensor([int(prompt_len)], dtype=torch.long, device=held_out_id.device)
-        out = self._model(
-            input_ids=held_out_id,
-            past_key_values=past_kv,
-            cache_position=cache_pos,
-            position_ids=cache_pos.unsqueeze(0),
-            use_cache=True,
-            output_attentions=False,
-            return_dict=True,
-        )
-        next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-        return out.past_key_values, next_token, int(prompt_len) + 1
-
     # The prefill below is a direct `self._model(...)` call, not HF `generate()`
     # (which carries its own @torch.no_grad()). Without this decorator autograd
     # retains every layer activation of the *uncompressed* prompt: measured 41.2
@@ -627,12 +594,7 @@ class LmmsLlava15Student(lmms):
         # attention -- which is fine for long-form generation but makes
         # short-answer/multiple-choice accuracy insensitive to keep_ratio,
         # since the whole answer is often that one token.
-        held_out_id = None
-        if delayed_replay and input_ids.shape[1] >= 2:
-            held_out_id = input_ids[:, -1:]
-            prefill_ids = input_ids[:, :-1]
-        else:
-            prefill_ids = input_ids
+        prefill_ids, held_out_id = split_held_out_token(input_ids, delayed_replay)
 
         try:
             prefill = self._model(
@@ -663,8 +625,8 @@ class LmmsLlava15Student(lmms):
         except ValueError:
             fallback_prompt_len = int(H_all[-1].shape[1])
             if held_out_id is not None:
-                past_kv, next_token, fallback_prompt_len = self._replay_held_out_token(
-                    past_kv, held_out_id, fallback_prompt_len
+                past_kv, next_token, fallback_prompt_len = replay_held_out_token(
+                    self._model, past_kv, held_out_id, fallback_prompt_len
                 )
             answer_ids = greedy_decode_with_kv(
                 self._model,
@@ -745,17 +707,10 @@ class LmmsLlava15Student(lmms):
                     weights[dropped] = 1.0 / float(dropped.numel())
                 drop_weights[layer_idx] = weights
                 continue
-            # The student is trained on the *output* of decoder layer `l`, i.e.
-            # hidden_states[l + 1] (hidden_states[0] is the embedding stream).
-            # This matches the zap pipeline that produced the checkpoint:
-            #   train_original_llava15_student.py:260  h_l = hidden_states[layer_idx + 1]
-            #   foresight/eval/lmms_llava15_original_student.py:552  H_all[layer_idx + 1]
-            #   scripts/milebench_zap_student.py:342  "layer i -> index i+1"
-            #   compute_mismatch.py:202  "hidden_states[l+1] = output of LLM layer l"
-            # A previous refactor dropped the +1 here (and in qvik/train/llava15.py)
-            # and left a comment asserting the opposite, so the student was being fed
-            # the input of layer l -- the output of layer l-1 -- one layer off.
-            H_l = H_all[layer_idx + 1]
+            # hidden_states[l + offset]; the offset is part of the checkpoint
+            # config (default 1 = output of layer l, as in the zap v1 trainer)
+            # so it always matches what the student was trained on.
+            H_l = self.student.layer_input(H_all, layer_idx)
             scores = self.student.forward_layer(layer_idx, H_l, image_idx_dev, q_idx_dev).squeeze(0)
             if n_keep >= n_img:
                 continue
@@ -790,13 +745,15 @@ class LmmsLlava15Student(lmms):
             visual_sink_kept_ratios=visual_sink_kept_ratios,
             visual_sink_mass_stats=visual_sink_mass_stats,
         )
+        self._keep_stats[-1]["delayed_replay"] = held_out_id is not None
         del H_all
-        absorb_plan = self._sink_absorb_plan(input_ids, keep_masks, drop_weights)
+        absorb_plan = self._sink_absorb_plan(prefill_ids, keep_masks, drop_weights)
         past_kv = trim_kv_cache_per_layer(past_kv, keep_masks, absorb_plan)
         if held_out_id is not None:
-            past_kv, next_token, prompt_len = self._replay_held_out_token(
-                past_kv, held_out_id, prompt_len
+            past_kv, next_token, prompt_len = replay_held_out_token(
+                self._model, past_kv, held_out_id, prompt_len
             )
+            keep_masks = extend_keep_masks_for_replay(keep_masks)
         if self.text_kv_config.mode == "none":
             answer_ids = greedy_decode_with_kv(
                 self._model,

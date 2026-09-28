@@ -185,9 +185,17 @@ class VisualUtilityStudent(nn.Module):
         grid_h: int = 24,
         grid_w: int = 24,
         variant: StudentVariant = "full",
+        hidden_state_offset: int = 1,
     ) -> None:
         super().__init__()
+        if hidden_state_offset not in (0, 1):
+            raise ValueError(f"hidden_state_offset must be 0 or 1, got {hidden_state_offset}")
         self.layer_indices = _ALL_LAYERS
+        # Index into HF `hidden_states` that feeds the scorer for decoder layer
+        # l: hidden_states[l + offset]. 1 = output of layer l (hidden_states[0]
+        # is the embedding stream). Stored in config.json so training,
+        # validation and inference cannot drift apart.
+        self.hidden_state_offset = int(hidden_state_offset)
         self.grid_h = grid_h
         self.grid_w = grid_w
         self.variant = variant
@@ -202,6 +210,7 @@ class VisualUtilityStudent(nn.Module):
             grid_h=grid_h,
             grid_w=grid_w,
             variant=variant,
+            hidden_state_offset=self.hidden_state_offset,
         )
         self.layers = nn.ModuleDict(
             {
@@ -231,6 +240,10 @@ class VisualUtilityStudent(nn.Module):
             H_l, image_indices, question_indices, self.grid_h, self.grid_w
         )
 
+    def layer_input(self, hidden_states, layer_idx: int) -> torch.Tensor:
+        """Select the HF hidden state this checkpoint scores layer `layer_idx` from."""
+        return hidden_states[layer_idx + self.hidden_state_offset]
+
     def save_pretrained(self, output_dir: str | Path) -> None:
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
@@ -244,6 +257,9 @@ class VisualUtilityStudent(nn.Module):
         cfg.pop("layer_indices", None)
         cfg.pop("scope", None)  # backwards compat: old checkpoints saved scope="A"
         cfg.setdefault("variant", "full")
+        # Checkpoints saved before this field existed were trained on the
+        # output of layer l (zap train_original_llava15_student.py:260).
+        cfg.setdefault("hidden_state_offset", 1)
         model = cls(**cfg)
         sd = torch.load(d / "pytorch_model.bin", map_location=map_location, weights_only=True)
         model.load_state_dict(sd)

@@ -117,7 +117,7 @@ def collate_single(batch: list[dict]) -> dict:
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--teacher-root", default="/workspace/zap/data/train/teacher/llava_onevision")
+    p.add_argument("--teacher-root", default=str(Path(REPO_ROOT) / "data/train/teacher/llava_onevision"))
     p.add_argument(
         "--datasets",
         nargs="+",
@@ -131,7 +131,7 @@ def main() -> int:
     )
     p.add_argument(
         "--llava-path",
-        default="/workspace/zap/model/llava-onevision-qwen2-7b-ov",
+        default=str(Path(REPO_ROOT) / "model/llava-onevision-qwen2-7b-ov"),
     )
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--lr", type=float, default=1e-4)

@@ -585,51 +585,51 @@ def collect_one(
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--model", default="/workspace/zap/model/llava-onevision-qwen2-7b-ov")
+    p.add_argument("--model", default=str(Path(REPO_ROOT) / "model/llava-onevision-qwen2-7b-ov"))
     p.add_argument("--dataset", required=True, choices=["scienceqa", "gqa", "textvqa", "st_vqa", "chartqa", "docvqa", "infovqa", "llava_instruct", "mmvet"])
     p.add_argument("--n-samples", type=int, default=500)
     p.add_argument("--max-new-tokens", type=int, default=64)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda:0")
-    p.add_argument("--output-root", default="/workspace/zap/data/train/teacher/llava_onevision")
-    p.add_argument("--problems-json", default="/workspace/zap/data/train/scienceqa/problems.json")
-    p.add_argument("--images-root", default="/workspace/zap/data/train/scienceqa/images")
+    p.add_argument("--output-root", default=str(Path(REPO_ROOT) / "data/train/teacher/llava_onevision"))
+    p.add_argument("--problems-json", default=str(Path(REPO_ROOT) / "data/train/scienceqa/problems.json"))
+    p.add_argument("--images-root", default=str(Path(REPO_ROOT) / "data/train/scienceqa/images"))
     p.add_argument("--split", default="train")
     p.add_argument(
         "--gqa-questions-json",
-        default="/workspace/zap/data/train/gqa/val_balanced_questions.json",
+        default=str(Path(REPO_ROOT) / "data/train/gqa/val_balanced_questions.json"),
     )
-    p.add_argument("--gqa-images-root", default="/workspace/zap/data/train/gqa/images")
-    p.add_argument("--textvqa-json", default="/workspace/zap/data/train/textvqa/train/data.json")
-    p.add_argument("--textvqa-data-root", default="/workspace/zap/data/train")
+    p.add_argument("--gqa-images-root", default=str(Path(REPO_ROOT) / "data/train/gqa/images"))
+    p.add_argument("--textvqa-json", default=str(Path(REPO_ROOT) / "data/train/textvqa/train/data.json"))
+    p.add_argument("--textvqa-data-root", default=str(Path(REPO_ROOT) / "data/train"))
     p.add_argument(
         "--st-vqa-json",
-        default="/workspace/zap/data/train/st_vqa/train_task_3.json",
+        default=str(Path(REPO_ROOT) / "data/train/st_vqa/train_task_3.json"),
     )
     p.add_argument(
         "--st-vqa-images-root",
-        default="/workspace/zap/data/train/st_vqa",
+        default=str(Path(REPO_ROOT) / "data/train/st_vqa"),
     )
     p.add_argument(
         "--chartqa-samples-json",
-        default="/workspace/zap/data/train/chartqa_train_sample/samples.json",
+        default=str(Path(REPO_ROOT) / "data/train/chartqa_train_sample/samples.json"),
     )
     p.add_argument(
         "--docvqa-samples-json",
-        default="/workspace/zap/data/train/docvqa_train_sample/samples.json",
+        default=str(Path(REPO_ROOT) / "data/train/docvqa_train_sample/samples.json"),
     )
     p.add_argument(
         "--infovqa-samples-json",
-        default="/workspace/zap/data/train/infovqa_train_sample/samples.json",
+        default=str(Path(REPO_ROOT) / "data/train/infovqa_train_sample/samples.json"),
     )
     p.add_argument("--max-image-size", type=int, default=0,
                    help="If >0, resize images so the longest side <= this value before processing.")
     p.add_argument("--hf-cache-dir", default=None,
                    help="HuggingFace datasets cache directory for llava_instruct / mmvet.")
     p.add_argument("--llava-instruct-samples-json",
-                   default="/workspace/zap/data/train/llava_instruct_sample/samples.json")
+                   default=str(Path(REPO_ROOT) / "data/train/llava_instruct_sample/samples.json"))
     p.add_argument("--mmvet-samples-json",
-                   default="/workspace/zap/data/train/mmvet_sample/samples.json")
+                   default=str(Path(REPO_ROOT) / "data/train/mmvet_sample/samples.json"))
     p.add_argument("--trajectory-m", type=int, default=1)
     p.add_argument("--trajectory-temperature", type=float, default=0.7)
     p.add_argument("--trajectory-top-p", type=float, default=0.9)

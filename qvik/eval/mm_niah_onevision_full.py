@@ -23,7 +23,7 @@ from PIL import Image
 from tqdm import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-WORKSPACE_ROOT = REPO_ROOT.parent
+WORKSPACE_ROOT = REPO_ROOT  # model/ and data/ live inside the project
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -67,7 +67,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--pretrained",
-        default=str(WORKSPACE_ROOT / "models" / "llava-onevision-qwen2-7b-ov"),
+        default=str(WORKSPACE_ROOT / "model" / "llava-onevision-qwen2-7b-ov"),
     )
     parser.add_argument("--conv_template", default="qwen_1_5")
     parser.add_argument("--min_text_tokens", type=int, default=0)

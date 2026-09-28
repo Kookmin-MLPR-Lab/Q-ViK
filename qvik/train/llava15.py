@@ -245,11 +245,9 @@ def train_one_sample(
     optimizer.zero_grad(set_to_none=True)
     loss_sum = mse_sum = rank_sum = 0.0
     for layer_idx in student.layer_indices:
-        # The label for layer `l` is predicted from that layer's *output*, i.e.
-        # hidden_states[l + 1] (hidden_states[0] is the embedding stream) -- as in
-        # the zap v1 trainer, train_original_llava15_student.py:260. The previous
-        # comment here claimed the opposite and dropped the +1.
-        h_l = hidden_states[layer_idx + 1].to(torch.float32)
+        # Same index in training, validation and inference: the student's
+        # `hidden_state_offset` (1 = output of layer l, as in the zap v1 trainer).
+        h_l = student.layer_input(hidden_states, layer_idx).to(torch.float32)
         scores = student.forward_layer(layer_idx, h_l, image_idx, question_idx)
         pred_norm = F.softmax(scores, dim=-1)
         target = teacher_norm[layer_idx].unsqueeze(0)
@@ -299,7 +297,7 @@ def eval_one_sample(
     )
     loss_sum = mse_sum = rank_sum = 0.0
     for layer_idx in student.layer_indices:
-        h_l = hidden_states[layer_idx].to(torch.float32)
+        h_l = student.layer_input(hidden_states, layer_idx).to(torch.float32)
         scores = student.forward_layer(layer_idx, h_l, image_idx, question_idx)
         pred_norm = F.softmax(scores, dim=-1)
         target = teacher_norm[layer_idx].unsqueeze(0)
@@ -350,6 +348,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kernel-size", type=int, default=7)
     parser.add_argument("--grid-h", type=int, default=24)
     parser.add_argument("--grid-w", type=int, default=24)
+    parser.add_argument(
+        "--hidden-state-offset",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help="Score layer l from hidden_states[l + offset]; 1 = output of layer l.",
+    )
     return parser.parse_args()
 
 
@@ -407,6 +412,7 @@ def main() -> int:
         kernel_size=args.kernel_size,
         grid_h=args.grid_h,
         grid_w=args.grid_w,
+        hidden_state_offset=args.hidden_state_offset,
     ).to(device)
     n_params = sum(p.numel() for p in student.parameters() if p.requires_grad)
     print(
