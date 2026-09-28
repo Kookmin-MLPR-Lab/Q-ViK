@@ -68,9 +68,8 @@ DATA_ROOT = Path(os.environ.get("QVIK_EVAL_DATA_ROOT", ZAP_ROOT / "data/eval"))
 LOCAL_TASKS = {
     "textvqa": {
         "base": "textvqa/textvqa_val.yaml",
-        # save_to_disk() arrow shards of the validation split.
-        "dataset_path": "arrow",
-        "data_files": {"validation": str(DATA_ROOT / "textvqa_val/data-*.arrow")},
+        "dataset_path": "parquet",
+        "data_files": {"validation": str(DATA_ROOT / "TextVQA/data/validation-*.parquet")},
     },
     "chartqa": {
         "base": "chartqa/chartqa.yaml",
@@ -124,7 +123,7 @@ LOCAL_TASKS = {
     "mmstar": {
         "base": "mmstar/mmstar.yaml",
         "dataset_path": "parquet",
-        "data_files": {"val": str(DATA_ROOT / "MMStar/mmstar_lmms.parquet")},
+        "data_files": {"val": str(DATA_ROOT / "MMStar/mmstar.parquet")},
     },
     "vizwiz_vqa": {
         "base": "vizwiz_vqa/vizwiz_vqa_val.yaml",
@@ -135,13 +134,13 @@ LOCAL_TASKS = {
         "base": "scienceqa/scienceqa_img.yaml",
         "dataset_path": "parquet",
         "dataset_name": "ScienceQA-IMG",
-        "data_files": {"test": str(DATA_ROOT / "ScienceQA/ScienceQA-IMG/test-*.parquet")},
+        "data_files": {"test": str(DATA_ROOT / "ScienceQA-IMG/test-*.parquet")},
     },
     "mmbench_en_dev": {
         "base": "mmbench/mmbench_en_dev.yaml",
         "dataset_path": "parquet",
         "dataset_name": "en",
-        "data_files": {"dev": str(DATA_ROOT / "MMBench/en/dev-*.parquet")},
+        "data_files": {"dev": str(DATA_ROOT / "MMBench-EN/dev-*.parquet")},
     },
 }
 
