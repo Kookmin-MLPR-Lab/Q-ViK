@@ -1,0 +1,50 @@
+name: qvik
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu121
+      - torch==2.5.1+cu121
+      - torchvision==0.20.1+cu121
+      - torchaudio==2.5.1+cu121
+      - transformers==4.46.0
+      - accelerate==1.13.0
+      - peft==0.19.1
+      - datasets==2.16.1
+      - tokenizers==0.20.3
+      - safetensors==0.7.0
+      - huggingface-hub==0.36.2
+      - numpy==1.26.4
+      - pillow
+      - opencv-python
+      - timm
+      - einops
+      - einops-exts
+      - sentencepiece
+      - qwen-vl-utils
+      - lmms-eval==0.2.4
+      - decord
+      - shortuuid
+      - httpx
+      - openai
+      - tqdm
+      - scipy
+      - scikit-learn
+      - pandas
+      - matplotlib
+      - seaborn
+      - pyyaml
+      - omegaconf
+      - pycocoevalcap
+      - pycocotools
+      - nltk
+      - rouge
+      - sacrebleu
+      - evaluate
+      - bert-score
+      - rapidfuzz
+      - editdistance
+      - word2number
