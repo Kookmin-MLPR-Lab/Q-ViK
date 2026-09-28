@@ -86,6 +86,14 @@ run_eval() {  # name model model_args
     --model_args "$3,keep_ratio=$KEEP,device=cuda:0,stats_output_dir=results/reproduce/$1" \
     --tasks "$EVAL_TASKS" --batch_size 1 --limit "$EVAL_LIMIT" \
     --output_path "results/reproduce/$1" > "$LOG_DIR/eval_$1.log" 2>&1
+  # lmms-eval logs model errors and still exits 0, so require one results file per task.
+  local n_tasks n_results
+  n_tasks=$(echo "$EVAL_TASKS" | tr ',' '\n' | grep -c .)
+  n_results=$(find "results/reproduce/$1" -name "*_results.json" | wc -l)
+  if [ "$n_results" -lt "$n_tasks" ]; then
+    echo "  [fail] eval_$1: $n_results/$n_tasks result files (see $LOG_DIR/eval_$1.log)" | tee -a "$LOG_DIR/stages.log"
+    exit 1
+  fi
   mark "eval_$1"
 }
 L15="pretrained=model/llava-v1.5-7b,keep_ratio_basis=image"
