@@ -81,11 +81,10 @@ for ds in textvqa gqa scienceqa; do
 done
 ```
 
-The LLaVA-1.5 teacher defaults to a 50/50 mix of question→image and
-answer→image attention, saved only when the model's answer is correct
-(`--question-weight 0.5 --require-correct`). The released zap checkpoints were
-trained on the answer-only teacher without the correctness filter; reproduce
-that with `--question-weight 0 --no-require-correct`.
+The LLaVA-1.5 teacher mixes question→image and answer→image attention 50/50
+(`--question-weight 0.5`); `--question-weight 0` gives the answer-only teacher.
+`--require-correct` (off by default) keeps only samples the model answers
+correctly.
 
 ### 2. Student training
 

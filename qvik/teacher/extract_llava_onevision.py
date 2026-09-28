@@ -597,7 +597,7 @@ def main() -> int:
     p.add_argument("--split", default="train")
     p.add_argument(
         "--gqa-questions-json",
-        default=str(Path(REPO_ROOT) / "data/train/gqa/val_balanced_questions.json"),
+        default=str(Path(REPO_ROOT) / "data/train/gqa/train_balanced_questions_600.json"),
     )
     p.add_argument("--gqa-images-root", default=str(Path(REPO_ROOT) / "data/train/gqa/images"))
     p.add_argument("--textvqa-json", default=str(Path(REPO_ROOT) / "data/train/textvqa/train/data.json"))

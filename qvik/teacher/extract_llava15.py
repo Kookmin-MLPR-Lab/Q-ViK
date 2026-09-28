@@ -606,7 +606,7 @@ def main() -> int:
     p.add_argument("--problems-json", default=str(WORKSPACE_ROOT / "data/train/scienceqa/problems.json"))
     p.add_argument("--images-root", default=str(WORKSPACE_ROOT / "data/train/scienceqa/images"))
     p.add_argument("--split", default="train")
-    p.add_argument("--gqa-questions-json", default=str(WORKSPACE_ROOT / "data/train/gqa/train_balanced_questions.json"))
+    p.add_argument("--gqa-questions-json", default=str(WORKSPACE_ROOT / "data/train/gqa/train_balanced_questions_600.json"))
     p.add_argument("--gqa-images-root", default=str(WORKSPACE_ROOT / "data/train/gqa/images"))
     p.add_argument("--llava-instruct-samples-json", default=str(WORKSPACE_ROOT / "data/train/llava_instruct_sample/samples.json"))
     p.add_argument("--textvqa-json", default=str(WORKSPACE_ROOT / "data/train/textvqa/train/data.json"))
@@ -617,8 +617,8 @@ def main() -> int:
     p.add_argument(
         "--require-correct",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Save teacher records only when the base model prediction is correct.",
+        default=False,
+        help="Save teacher records only when the base model prediction is correct (off by default).",
     )
     p.add_argument(
         "--question-weight",
