@@ -81,10 +81,9 @@ for ds in textvqa gqa scienceqa; do
 done
 ```
 
-The LLaVA-1.5 teacher mixes question→image and answer→image attention 50/50
-(`--question-weight 0.5`); `--question-weight 0` gives the answer-only teacher.
-`--require-correct` (off by default) keeps only samples the model answers
-correctly.
+The teacher is the attention from generated answer tokens to image tokens,
+averaged over heads and answer tokens and normalized per layer (the zap
+teacher used by the released checkpoints).
 
 ### 2. Student training
 

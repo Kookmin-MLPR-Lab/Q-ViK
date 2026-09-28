@@ -28,10 +28,8 @@ import torch
 from PIL import Image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-WORKSPACE_ROOT = PROJECT_ROOT  # model/ and data/ live inside the project
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from qvik.teacher.answer_correctness import is_correct_prediction
 # torch 2.5 + transformers 5.3 incompatibility: patch bin-load safety check.
 try:
     import transformers.modeling_utils as _tmu
@@ -202,15 +200,23 @@ def infer_question_positions(
     return torch.arange(last_img + 1, prompt_len_mm, dtype=torch.long)
 
 
-def _generate_answer(
+def _collect_attention_two_pass(
     model,
     inputs: dict,
+    image_indices: torch.Tensor,
+    prompt_len_mm: int,
     max_new_tokens: int,
     do_sample: bool,
     temperature: float,
     top_p: float,
-) -> torch.Tensor:
-    """Generate answer tokens without retaining generation-time attentions."""
+    eps: float = 1e-8,
+) -> tuple[torch.Tensor, int]:
+    """Two-pass teacher extraction: generate answer, then forward pass with attention.
+
+    This avoids generate(output_attentions=True) which doesn't work in newer
+    transformers versions for the original LLaVA model.
+    """
+    # Pass 1: generate answer tokens (no attention tracking)
     with torch.no_grad():
         gen_out = model.generate(
             **inputs,
@@ -225,48 +231,11 @@ def _generate_answer(
         )
     # gen_out: [1, prompt_len_text + T_generated]
     prompt_len_text = int(inputs["input_ids"].shape[1])
-    answer_ids = gen_out[:, prompt_len_text:].detach()
-    del gen_out
-    return answer_ids
+    T = int(gen_out.shape[1]) - prompt_len_text
 
-
-def _normalize_teacher(teacher: torch.Tensor, eps: float) -> torch.Tensor:
-    """Normalize each layer's image-token scores into a distribution."""
-    return teacher / teacher.sum(dim=-1, keepdim=True).clamp_min(eps)
-
-
-def _mix_teacher_signals(
-    question_teacher: torch.Tensor,
-    answer_teacher: torch.Tensor,
-    question_weight: float,
-    eps: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Mix separately normalized question and answer attention distributions."""
-    if not 0.0 <= question_weight <= 1.0:
-        raise ValueError(f"question_weight must be in [0, 1], got {question_weight}")
-    question_norm = _normalize_teacher(question_teacher, eps)
-    answer_norm = _normalize_teacher(answer_teacher, eps)
-    mixed = (
-        question_weight * question_norm
-        + (1.0 - question_weight) * answer_norm
-    )
-    return _normalize_teacher(mixed, eps), question_norm, answer_norm
-
-
-def _collect_attention_for_question_and_answer(
-    model,
-    inputs: dict,
-    image_indices: torch.Tensor,
-    question_indices: torch.Tensor,
-    prompt_len_mm: int,
-    answer_ids: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, int]:
-    """Collect question→image and answer→image attention in one full pass.
-
-    The model is causal, so question-token rows are identical to those from a
-    standalone prefill pass even though answer tokens are appended here.
-    """
-    T = int(answer_ids.shape[1])
+    # Pass 2: forward on full sequence (prompt + answer) with output_attentions=True
+    # Build full input: original input_ids + generated answer tokens
+    answer_ids = gen_out[0, prompt_len_text:].unsqueeze(0)  # [1, T]
     full_input_ids = torch.cat([inputs["input_ids"], answer_ids], dim=1)  # [1, prompt+T]
 
     with torch.no_grad():
@@ -283,39 +252,26 @@ def _collect_attention_for_question_and_answer(
     # Extract attention from answer positions to image positions
     L = len(full_out.attentions)
     n_img = int(image_indices.numel())
-    question_teacher = torch.zeros(L, n_img, dtype=torch.float32)
-    answer_teacher = torch.zeros(L, n_img, dtype=torch.float32)
+    teacher = torch.zeros(L, n_img, dtype=torch.float32)
 
     full_len_mm = prompt_len_mm + T
     answer_positions = list(range(prompt_len_mm, full_len_mm))
-    question_positions = question_indices.to(full_input_ids.device)
 
     if not answer_positions:
         # Model generated nothing (immediate EOS) — fall back to last prompt token
         answer_positions = [prompt_len_mm - 1]
-    if question_positions.numel() == 0:
-        # Defensive fallback for prompts whose image tokens end the prefill.
-        question_positions = torch.tensor(
-            [prompt_len_mm - 1], dtype=torch.long, device=full_input_ids.device
-        )
 
     for l, attn in enumerate(full_out.attentions):
         # attn: [B, H, T_mm, T_mm]
-        image_indices_dev = image_indices.to(attn.device)
-        question_to_img = attn[0, :, question_positions, :].index_select(
-            dim=-1, index=image_indices_dev
-        )
-        answer_to_img = attn[0, :, answer_positions, :].index_select(
-            dim=-1, index=image_indices_dev
-        )
-        # [H, T_query, n_img] → average over heads and query tokens.
-        question_teacher[l] = question_to_img.float().mean(dim=(0, 1)).cpu()
-        answer_teacher[l] = answer_to_img.float().mean(dim=(0, 1)).cpu()
+        # Average attention from answer tokens to image positions
+        attn_to_img = attn[0, :, answer_positions, :].index_select(dim=-1, index=image_indices.to(attn.device))
+        # [H, T_answer, n_img] → average over heads then answer tokens
+        teacher[l] = attn_to_img.float().mean(dim=0).mean(dim=0).cpu()
 
-    del full_out
+    del gen_out, full_out
     gc.collect()
     torch.cuda.empty_cache()
-    return question_teacher, answer_teacher, T
+    return teacher, T
 
 
 @torch.no_grad()
@@ -330,17 +286,8 @@ def collect_one(
     trajectory_m: int = 1,
     trajectory_temperature: float = 0.7,
     trajectory_top_p: float = 0.9,
-    dataset: str = "",
-    answers: tuple[str, ...] = (),
-    answer_index: int | None = None,
-    choices: tuple[str, ...] = (),
-    require_correct: bool = True,
-    question_weight: float = 0.5,
     eps: float = 1e-8,
-) -> tuple[dict | None, str]:
-    if not 0.0 <= question_weight <= 1.0:
-        raise ValueError(f"question_weight must be in [0, 1], got {question_weight}")
-
+) -> dict:
     inputs = prepare_inputs(tokenizer, image_processor, prompt, image, device)
     image_positions, prompt_len_mm = infer_image_positions_orig(inputs["input_ids"])
     image_indices = image_positions.to(device)
@@ -349,95 +296,38 @@ def collect_one(
 
     M = max(1, trajectory_m)
     use_sampling = M > 1
-    max_attempts = 1 if M == 1 else max(20, M * 10)
 
-    question_traj_scores: list[torch.Tensor] = []
-    answer_traj_scores: list[torch.Tensor] = []
+    traj_scores: list[torch.Tensor] = []
     t_lengths: list[int] = []
-    predictions: list[str] = []
-    prediction_correctness: list[bool] = []
-    last_prediction = ""
-    for _ in range(max_attempts):
-        answer_ids = _generate_answer(
+    for _ in range(M):
+        score, T = _collect_attention_two_pass(
             model=model,
             inputs=inputs,
+            image_indices=image_indices,
+            prompt_len_mm=prompt_len_mm,
             max_new_tokens=max_new_tokens,
             do_sample=use_sampling,
             temperature=trajectory_temperature,
             top_p=trajectory_top_p,
+            eps=eps,
         )
-        prediction = tokenizer.decode(answer_ids[0], skip_special_tokens=True).strip()
-        last_prediction = prediction
-        prediction_correct = is_correct_prediction(
-            dataset,
-            prediction,
-            answers,
-            answer_index=answer_index,
-            choices=choices,
-        )
-        if require_correct and not prediction_correct:
-            del answer_ids
-            if M == 1:
-                return None, prediction
-            continue
-
-        question_score, answer_score, T = _collect_attention_for_question_and_answer(
-            model=model,
-            inputs=inputs,
-            image_indices=image_indices,
-            question_indices=question_positions,
-            prompt_len_mm=prompt_len_mm,
-            answer_ids=answer_ids,
-        )
-        del answer_ids
-        question_traj_scores.append(question_score)
-        answer_traj_scores.append(answer_score)
+        traj_scores.append(score)
         t_lengths.append(T)
-        predictions.append(prediction)
-        prediction_correctness.append(prediction_correct)
-        if len(answer_traj_scores) == M:
-            break
 
-    if len(answer_traj_scores) != M:
-        return None, last_prediction
-
-    question_stacked = torch.stack(question_traj_scores, dim=0)
-    answer_stacked = torch.stack(answer_traj_scores, dim=0)
-    teacher_question_raw = question_stacked.mean(dim=0)
-    teacher_answer_raw = answer_stacked.mean(dim=0)
-    answer_weight = 1.0 - question_weight
-    # Mix normalized distributions so question and answer make the requested
-    # contribution even when their total attention mass differs.
-    teacher_norm, teacher_question_norm, teacher_answer_norm = _mix_teacher_signals(
-        teacher_question_raw,
-        teacher_answer_raw,
-        question_weight,
-        eps,
-    )
+    stacked = torch.stack(traj_scores, dim=0)
+    teacher = stacked.mean(dim=0)
+    teacher_norm = teacher / teacher.sum(dim=-1, keepdim=True).clamp_min(eps)
 
     return dict(
-        teacher_raw=teacher_norm.to(torch.float16),
+        teacher_raw=teacher.to(torch.float16),
         teacher_norm=teacher_norm.to(torch.float16),
-        teacher_question_raw=teacher_question_raw.to(torch.float16),
-        teacher_question_norm=teacher_question_norm.to(torch.float16),
-        teacher_answer_raw=teacher_answer_raw.to(torch.float16),
-        teacher_answer_norm=teacher_answer_norm.to(torch.float16),
-        teacher_question_weight=float(question_weight),
-        teacher_answer_weight=float(answer_weight),
-        teacher_signal="question_answer_normalized_mix",
-        teacher_question_source="causal_prefill_question_tokens",
-        teacher_answer_source="generated_answer_tokens",
         image_token_indices=image_positions.to(torch.long),
         question_token_indices=question_positions.to(torch.long),
         prompt_len_mm=int(prompt_len_mm),
         T=int(np.mean(t_lengths)),
         n_img=int(n_img),
         trajectory_m=M,
-        predictions=predictions,
-        predictions_correct=prediction_correctness,
-        prediction=predictions[0],
-        prediction_correct=prediction_correctness[0],
-    ), predictions[0]
+    )
 
 
 # ── dataset loaders ────────────────────────────────────────────────────────────
@@ -451,44 +341,31 @@ def _fmt(question: str) -> str:
 
 def _resolve(p: str) -> str | None:
     path = Path(p)
-    if path.exists():
-        return str(path)
-    alt = Path(str(p).replace("/workspace/zap/data/train/", "/workspace/zap/data/train/", 1))
-    return str(alt) if alt.exists() else None
+    return str(path) if path.exists() else None
 
 
 def load_samples_from_json(
-    samples_json: Path, max_candidates: int, seed: int
-) -> list[dict]:
+    samples_json: Path, n_samples: int, seed: int
+) -> list[tuple[str, str, str]]:
     records = json.loads(samples_json.read_text())
-    candidates: list[dict] = []
+    candidates: list[tuple[str, str, str]] = []
     for rec in records:
         resolved = _resolve(rec["image_path"])
         if resolved is None:
             continue
-        answer = str(rec.get("answer", "")).strip()
-        if not answer:
-            continue
-        candidates.append(dict(
-            sample_id=str(rec["sample_id"]),
-            prompt=_fmt(str(rec["question"]).strip()),
-            image_path=resolved,
-            answers=(answer,),
-            answer_index=None,
-            choices=(),
-        ))
+        candidates.append((str(rec["sample_id"]), _fmt(str(rec["question"]).strip()), resolved))
     rng = random.Random(seed)
     rng.shuffle(candidates)
-    return candidates[:max_candidates] if max_candidates > 0 else candidates
+    return candidates[:n_samples]
 
 
 def load_scienceqa_samples(
-    problems_json: Path, images_root: Path, split: str, max_candidates: int, seed: int
-) -> list[dict]:
+    problems_json: Path, images_root: Path, split: str, n_samples: int, seed: int
+) -> list[tuple[str, str, str]]:
     problems = json.loads(problems_json.read_text())
-    candidates: list[dict] = []
+    candidates: list[tuple[str, str, str]] = []
     for qid, prob in problems.items():
-        if prob.get("split") != split:
+        if not qid.startswith(f"{split}_"):
             continue
         img_path = images_root / split / qid / "image.png"
         if not img_path.exists():
@@ -496,29 +373,18 @@ def load_scienceqa_samples(
         question = prob.get("question", "").strip()
         choices = prob.get("choices", [])
         if choices:
-            question += "\n" + "\n".join(
-                f"({chr(65 + i)}) {choice}" for i, choice in enumerate(choices)
-            )
-            question += "\nAnswer with the option letter only."
-        answer_index = int(prob["answer"])
-        candidates.append(dict(
-            sample_id=str(qid),
-            prompt=_fmt(question),
-            image_path=str(img_path),
-            answers=(str(choices[answer_index]),),
-            answer_index=answer_index,
-            choices=tuple(str(choice) for choice in choices),
-        ))
+            question += "\n" + " ".join(f"({chr(65 + i)}) {c}" for i, c in enumerate(choices))
+        candidates.append((qid, _fmt(question), str(img_path)))
     rng = random.Random(seed)
     rng.shuffle(candidates)
-    return candidates[:max_candidates] if max_candidates > 0 else candidates
+    return candidates[:n_samples]
 
 
 def load_gqa_samples(
-    questions_json: Path, images_root: Path, max_candidates: int, seed: int
-) -> list[dict]:
+    questions_json: Path, images_root: Path, n_samples: int, seed: int
+) -> list[tuple[str, str, str]]:
     questions = json.loads(questions_json.read_text())
-    candidates: list[dict] = []
+    candidates: list[tuple[str, str, str]] = []
     for qid, rec in questions.items():
         image_id = rec.get("imageId") or rec.get("image_id")
         if not image_id:
@@ -527,28 +393,20 @@ def load_gqa_samples(
         if not img_path.exists():
             continue
         question = str(rec.get("question", "")).strip()
-        answer = str(rec.get("answer", "")).strip()
-        if not question or not answer:
+        if not question:
             continue
-        candidates.append(dict(
-            sample_id=str(qid),
-            prompt=_fmt(f"Question: {question}\nAnswer the question briefly."),
-            image_path=str(img_path),
-            answers=(answer,),
-            answer_index=None,
-            choices=(),
-        ))
+        candidates.append((str(qid), _fmt(f"Question: {question}\nAnswer the question briefly."), str(img_path)))
     rng = random.Random(seed)
     rng.shuffle(candidates)
-    return candidates[:max_candidates] if max_candidates > 0 else candidates
+    return candidates[:n_samples]
 
 
 def load_textvqa_samples(
-    data_json: Path, data_root: Path, max_candidates: int, seed: int
-) -> list[dict]:
+    data_json: Path, data_root: Path, n_samples: int, seed: int
+) -> list[tuple[str, str, str]]:
     payload = json.loads(data_json.read_text())
     records = payload.get("data", payload) if isinstance(payload, dict) else payload
-    candidates: list[dict] = []
+    candidates: list[tuple[str, str, str]] = []
     for rec in records:
         question = str(rec.get("question", "")).strip()
         if not question:
@@ -557,23 +415,11 @@ def load_textvqa_samples(
         img_path = data_root / rel if rel and not Path(rel).is_absolute() else Path(rel)
         if not img_path.exists():
             continue
-        answers = tuple(
-            str(answer).strip() for answer in rec.get("answers", []) if str(answer).strip()
-        )
-        if not answers:
-            continue
         qid = str(rec.get("question_id", rec.get("id", f"tvqa_{len(candidates):06d}")))
-        candidates.append(dict(
-            sample_id=qid,
-            prompt=_fmt(f"Question: {question}\nAnswer the question briefly."),
-            image_path=str(img_path),
-            answers=answers,
-            answer_index=None,
-            choices=(),
-        ))
+        candidates.append((qid, _fmt(f"Question: {question}\nAnswer the question briefly."), str(img_path)))
     rng = random.Random(seed)
     rng.shuffle(candidates)
-    return candidates[:max_candidates] if max_candidates > 0 else candidates
+    return candidates[:n_samples]
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
@@ -581,57 +427,29 @@ def load_textvqa_samples(
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--model", default=str(WORKSPACE_ROOT / "model/llava-v1.5-7b"))
+    p.add_argument("--model", default=str(PROJECT_ROOT / "model/llava-v1.5-7b"))
     p.add_argument(
         "--dataset",
         required=True,
         choices=["scienceqa", "gqa", "textvqa", "llava_instruct"],
     )
-    p.add_argument(
-        "--n-samples",
-        type=int,
-        default=300,
-        help="Target number of teacher samples to save.",
-    )
-    p.add_argument(
-        "--max-candidates",
-        type=int,
-        default=0,
-        help="Maximum shuffled candidates to inspect; 0 means all available candidates.",
-    )
+    p.add_argument("--n-samples", type=int, default=600)
     p.add_argument("--max-new-tokens", type=int, default=64)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda:0")
-    p.add_argument("--output-root", default=str(WORKSPACE_ROOT / "data/train/teacher/llava15"))
-    p.add_argument("--problems-json", default=str(WORKSPACE_ROOT / "data/train/scienceqa/problems.json"))
-    p.add_argument("--images-root", default=str(WORKSPACE_ROOT / "data/train/scienceqa/images"))
+    p.add_argument("--output-root", default=str(PROJECT_ROOT / "data/train/teacher/llava15"))
+    p.add_argument("--problems-json", default=str(PROJECT_ROOT / "data/train/scienceqa/problems.json"))
+    p.add_argument("--images-root", default=str(PROJECT_ROOT / "data/train/scienceqa/images"))
     p.add_argument("--split", default="train")
-    p.add_argument("--gqa-questions-json", default=str(WORKSPACE_ROOT / "data/train/gqa/train_balanced_questions_600.json"))
-    p.add_argument("--gqa-images-root", default=str(WORKSPACE_ROOT / "data/train/gqa/images"))
-    p.add_argument("--llava-instruct-samples-json", default=str(WORKSPACE_ROOT / "data/train/llava_instruct_sample/samples.json"))
-    p.add_argument("--textvqa-json", default=str(WORKSPACE_ROOT / "data/train/textvqa/train/data.json"))
-    p.add_argument("--textvqa-data-root", default=str(WORKSPACE_ROOT / "data/train"))
+    p.add_argument("--gqa-questions-json", default=str(PROJECT_ROOT / "data/train/gqa/train_balanced_questions_600.json"))
+    p.add_argument("--gqa-images-root", default=str(PROJECT_ROOT / "data/train/gqa/images"))
+    p.add_argument("--llava-instruct-samples-json", default=str(PROJECT_ROOT / "data/train/llava_instruct_sample/samples.json"))
+    p.add_argument("--textvqa-json", default=str(PROJECT_ROOT / "data/train/textvqa/train/data.json"))
+    p.add_argument("--textvqa-data-root", default=str(PROJECT_ROOT / "data/train"))
     p.add_argument("--trajectory-m", type=int, default=1)
     p.add_argument("--trajectory-temperature", type=float, default=0.7)
     p.add_argument("--trajectory-top-p", type=float, default=0.9)
-    p.add_argument(
-        "--require-correct",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Save teacher records only when the base model prediction is correct (off by default).",
-    )
-    p.add_argument(
-        "--question-weight",
-        type=float,
-        default=0.5,
-        help=(
-            "Weight of the normalized question/prefill attention in the teacher; "
-            "answer attention receives 1 - this value."
-        ),
-    )
     args = p.parse_args()
-    if not 0.0 <= args.question_weight <= 1.0:
-        p.error("--question-weight must be in [0, 1]")
 
     torch.manual_seed(args.seed)
     random.seed(args.seed)
@@ -645,60 +463,36 @@ def main() -> int:
 
     if args.dataset == "scienceqa":
         samples = load_scienceqa_samples(
-            Path(args.problems_json), Path(args.images_root), args.split, args.max_candidates, args.seed
+            Path(args.problems_json), Path(args.images_root), args.split, args.n_samples, args.seed
         )
     elif args.dataset == "gqa":
         samples = load_gqa_samples(
-            Path(args.gqa_questions_json), Path(args.gqa_images_root), args.max_candidates, args.seed
+            Path(args.gqa_questions_json), Path(args.gqa_images_root), args.n_samples, args.seed
         )
     elif args.dataset == "textvqa":
         samples = load_textvqa_samples(
-            Path(args.textvqa_json), Path(args.textvqa_data_root), args.max_candidates, args.seed
+            Path(args.textvqa_json), Path(args.textvqa_data_root), args.n_samples, args.seed
         )
     else:  # llava_instruct
         samples = load_samples_from_json(
-            Path(args.llava_instruct_samples_json), args.max_candidates, args.seed
+            Path(args.llava_instruct_samples_json), args.n_samples, args.seed
         )
-    print(
-        f"[info] dataset={args.dataset} candidates={len(samples)} "
-        f"target={args.n_samples} require_correct={args.require_correct} "
-        f"question_weight={args.question_weight:.3f} "
-        f"answer_weight={1.0 - args.question_weight:.3f}",
-        flush=True,
-    )
+    print(f"[info] dataset={args.dataset} loaded {len(samples)} samples", flush=True)
 
-    existing_paths = list(out_dir.glob("*.pt"))
-    existing = len(existing_paths)
-    existing_correct = 0
-    for existing_path in existing_paths:
-        existing_rec = torch.load(existing_path, weights_only=False, map_location="cpu")
-        existing_correct += int(bool(existing_rec.get("prediction_correct", False)))
-    existing_incorrect = existing - existing_correct
-    saved = existing
-    saved_correct = existing_correct
-    saved_incorrect = existing_incorrect
-    newly_saved = 0
-    evaluated = 0
-    rejected_incorrect = 0
-    incorrect_examples: list[dict] = []
+    saved = 0
     skipped: list[tuple[str, str]] = []
     t_list: list[int] = []
     t0 = time.time()
 
-    for sample in samples:
-        if saved >= args.n_samples:
-            break
-        sid = sample["sample_id"]
-        prompt = sample["prompt"]
-        img_path = sample["image_path"]
+    for idx, (sid, prompt, img_path) in enumerate(samples):
         safe_sid = re.sub(r"[^A-Za-z0-9._-]+", "_", str(sid))[:128]
         out_path = out_dir / f"{safe_sid}.pt"
         if out_path.exists():
+            saved += 1
             continue
-        evaluated += 1
         try:
             image = Image.open(img_path).convert("RGB")
-            rec, prediction = collect_one(
+            rec = collect_one(
                 model=model,
                 tokenizer=tokenizer,
                 image_processor=image_processor,
@@ -709,30 +503,7 @@ def main() -> int:
                 trajectory_m=args.trajectory_m,
                 trajectory_temperature=args.trajectory_temperature,
                 trajectory_top_p=args.trajectory_top_p,
-                dataset=args.dataset,
-                answers=sample["answers"],
-                answer_index=sample["answer_index"],
-                choices=sample["choices"],
-                require_correct=args.require_correct,
-                question_weight=args.question_weight,
             )
-            if rec is None:
-                rejected_incorrect += 1
-                if len(incorrect_examples) < 100:
-                    incorrect_examples.append(dict(
-                        sample_id=sid,
-                        prediction=prediction,
-                        answers=list(sample["answers"]),
-                        answer_index=sample["answer_index"],
-                    ))
-                if evaluated % 25 == 0:
-                    print(
-                        f"[progress] evaluated={evaluated}/{len(samples)} "
-                        f"saved={saved}/{args.n_samples} "
-                        f"incorrect={rejected_incorrect} skipped={len(skipped)}",
-                        flush=True,
-                    )
-                continue
             rec.update(
                 sample_id=sid,
                 dataset=args.dataset,
@@ -741,20 +512,11 @@ def main() -> int:
                 image_path=img_path,
                 seed=args.seed,
                 max_new_tokens=args.max_new_tokens,
-                ground_truth_answers=list(sample["answers"]),
-                ground_truth_answer_index=sample["answer_index"],
-                ground_truth_choices=list(sample["choices"]),
-                require_correct=args.require_correct,
             )
             torch.save(rec, out_path)
             saved += 1
-            if rec["prediction_correct"]:
-                saved_correct += 1
-            else:
-                saved_incorrect += 1
-            newly_saved += 1
             t_list.append(rec["T"])
-            if newly_saved == 1:
+            if idx == 0:
                 print(
                     f"[sanity] sid={sid} L={rec['teacher_raw'].shape[0]} "
                     f"N_I={rec['teacher_raw'].shape[1]} T={rec['T']} "
@@ -768,25 +530,20 @@ def main() -> int:
             print(f"[skip] {sid}: {e}", flush=True)
             continue
 
-        if evaluated % 25 == 0 or saved == args.n_samples:
+        if (idx + 1) % 25 == 0:
             elapsed = time.time() - t0
             print(
-                f"[progress] evaluated={evaluated}/{len(samples)} "
-                f"| rate={evaluated/max(elapsed, 1e-6):.2f}/s "
+                f"[progress] {idx+1}/{len(samples)} | rate={(idx+1)/max(elapsed, 1e-6):.2f}/s "
                 f"| elapsed={elapsed:.1f}s | T_mean={np.mean(t_list):.2f} "
-                f"| saved={saved}/{args.n_samples} correct={saved_correct} "
-                f"incorrect={saved_incorrect} rejected={rejected_incorrect} "
-                f"skipped={len(skipped)}",
+                f"| saved={saved} skipped={len(skipped)}",
                 flush=True,
             )
         torch.cuda.empty_cache()
 
     elapsed = time.time() - t0
     print(
-        f"[done] dataset={args.dataset} saved={saved}/{args.n_samples} "
-        f"correct={saved_correct} incorrect={saved_incorrect} "
-        f"candidates={len(samples)} evaluated={evaluated} "
-        f"rejected={rejected_incorrect} skipped={len(skipped)} elapsed={elapsed:.1f}s "
+        f"[done] dataset={args.dataset} saved={saved}/{len(samples)} "
+        f"skipped={len(skipped)} elapsed={elapsed:.1f}s "
         f"T_mean={np.mean(t_list) if t_list else 0:.2f}",
         flush=True,
     )
@@ -796,35 +553,15 @@ def main() -> int:
         dataset=args.dataset,
         n_requested=args.n_samples,
         n_saved=saved,
-        n_existing=existing,
-        n_existing_correct=existing_correct,
-        n_existing_incorrect=existing_incorrect,
-        n_newly_saved=newly_saved,
-        n_saved_correct=saved_correct,
-        n_saved_incorrect=saved_incorrect,
-        n_candidates=len(samples),
-        n_evaluated=evaluated,
-        n_rejected_incorrect=rejected_incorrect,
-        incorrect_examples=incorrect_examples,
         n_skipped=len(skipped),
         skipped=skipped,
         t_mean=float(np.mean(t_list)) if t_list else 0.0,
         seed=args.seed,
         model=args.model,
         max_new_tokens=args.max_new_tokens,
-        require_correct=args.require_correct,
-        question_weight=args.question_weight,
-        answer_weight=1.0 - args.question_weight,
         elapsed_seconds=elapsed,
     ), indent=2))
     print(f"[save] {summary_path}", flush=True)
-    if saved != args.n_samples:
-        print(
-            f"[error] Exhausted candidates before reaching target: "
-            f"{saved}/{args.n_samples}",
-            flush=True,
-        )
-        return 2
     return 0
 
 
