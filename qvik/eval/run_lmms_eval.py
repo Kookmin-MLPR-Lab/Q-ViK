@@ -63,24 +63,14 @@ os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
 # via `include:` and only override the dataset location. Datasets that ship only
 # the eval split locally use the parquet/arrow builder with explicit data_files
 # so HF doesn't try to infer a (missing) train/test split layout.
-def _default_eval_root() -> Path:
-    for candidate in (ZAP_ROOT / "data/eval", ZAP_ROOT.parent / "data/eval"):
-        if candidate.is_dir():
-            return candidate
-    return ZAP_ROOT / "data/eval"
-
-
-DATA_ROOT = Path(os.environ.get("QVIK_EVAL_DATA_ROOT", _default_eval_root()))
+# All evaluation data lives under <project>/data/eval (override with QVIK_EVAL_DATA_ROOT).
+DATA_ROOT = Path(os.environ.get("QVIK_EVAL_DATA_ROOT", ZAP_ROOT / "data/eval"))
 LOCAL_TASKS = {
     "textvqa": {
         "base": "textvqa/textvqa_val.yaml",
-        "dataset_path": "parquet",
-        "data_files": {
-            "validation": str(
-                DATA_ROOT
-                / "TextVQA/data/validation-*.parquet"
-            )
-        },
+        # save_to_disk() arrow shards of the validation split.
+        "dataset_path": "arrow",
+        "data_files": {"validation": str(DATA_ROOT / "textvqa_val/data-*.arrow")},
     },
     "chartqa": {
         "base": "chartqa/chartqa.yaml",
@@ -107,7 +97,7 @@ LOCAL_TASKS = {
         "dataset_path": "parquet",
         "data_files": {
             "val": str(
-                DATA_ROOT / "COCOCaps/COCO-Caption2017/data/val-*.parquet"
+                DATA_ROOT / "COCO-Caption2017/data/val-*.parquet"
             )
         },
     },
@@ -134,7 +124,7 @@ LOCAL_TASKS = {
     "mmstar": {
         "base": "mmstar/mmstar.yaml",
         "dataset_path": "parquet",
-        "data_files": {"val": str(DATA_ROOT / "MMStar/mmstar.parquet")},
+        "data_files": {"val": str(DATA_ROOT / "MMStar/mmstar_lmms.parquet")},
     },
     "vizwiz_vqa": {
         "base": "vizwiz_vqa/vizwiz_vqa_val.yaml",
@@ -145,13 +135,13 @@ LOCAL_TASKS = {
         "base": "scienceqa/scienceqa_img.yaml",
         "dataset_path": "parquet",
         "dataset_name": "ScienceQA-IMG",
-        "data_files": {"test": str(DATA_ROOT / "ScienceQA-IMG/test-*.parquet")},
+        "data_files": {"test": str(DATA_ROOT / "ScienceQA/ScienceQA-IMG/test-*.parquet")},
     },
     "mmbench_en_dev": {
         "base": "mmbench/mmbench_en_dev.yaml",
         "dataset_path": "parquet",
         "dataset_name": "en",
-        "data_files": {"dev": str(DATA_ROOT / "MMBench-EN/dev-*.parquet")},
+        "data_files": {"dev": str(DATA_ROOT / "MMBench/en/dev-*.parquet")},
     },
 }
 

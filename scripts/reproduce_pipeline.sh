@@ -20,7 +20,6 @@ LOG_DIR="logs/reproduce"
 mkdir -p "$LOG_DIR"
 
 export CUDA_VISIBLE_DEVICES="$GPU" PYTHONUNBUFFERED=1 HF_DATASETS_OFFLINE=1
-export QVIK_EVAL_DATA_ROOT="${QVIK_EVAL_DATA_ROOT:-$project_root/data/eval_compat}"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 stage() { echo "===== [$(date -Is)] $*" | tee -a "$LOG_DIR/stages.log"; }
