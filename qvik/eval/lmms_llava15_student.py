@@ -49,7 +49,7 @@ def _patch_torch_load_legacy_bin_mmap() -> None:
 
 _patch_torch_load_legacy_bin_mmap()
 
-from kvevict.presses.visual_utility_student_llava15 import VisualUtilityStudent  # noqa: E402
+from qvik.student.visual_utility_student_llava15 import VisualUtilityStudent  # noqa: E402
 
 from .kv_decode_utils import (  # noqa: E402
     greedy_decode_with_kv,

@@ -30,7 +30,7 @@ if REPO_ROOT not in sys.path:
 # custom siglip output classes (see qvik/llava_onevision/__init__.py).
 import qvik.llava_onevision  # noqa: F401
 
-from kvevict.presses.visual_utility_student_onevision import (
+from qvik.student.visual_utility_student_onevision import (
     VisualUtilityStudentOneVision,
     pairwise_ranking_loss,
 )

@@ -245,7 +245,7 @@ def pairwise_ranking_loss(
 ) -> torch.Tensor:
     """Margin-ranking loss between pred-top and pred-bottom selected by target.
 
-    Mirrors `kvevict.presses.visual_utility_student_llava15.pairwise_ranking_loss`.
+    Mirrors `qvik.student.visual_utility_student_llava15.pairwise_ranking_loss`.
     """
     if pred.shape != target.shape or pred.ndim != 2:
         raise ValueError(
