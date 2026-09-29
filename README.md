@@ -1,8 +1,6 @@
 # Q-ViK
 
-Q-ViK is a training-based KV cache compression method for visual language models.
-A lightweight student MLP+CNN is trained to predict which image tokens are important for future decoding,
-and used at inference time to selectively prune the KV cache — without any changes to the base model.
+
 
 ## Environment
 
@@ -48,12 +46,20 @@ data/
 │       ├── llava15/      # extracted teacher scores for LLaVA-1.5
 │       └── llava_onevision/  # extracted teacher scores for OneVision
 └── eval/
-    ├── TextVQA/
-    ├── GQA/
-    ├── ChartQA/
-    ├── DocVQA/
-    ├── NoCaps/
-    ├── TextCaps/
+    ├── textvqa_val/                  # TextVQA val (arrow shards)
+    ├── GQA/                          # testdev_balanced_{instructions,images}
+    ├── ChartQA/data/
+    ├── DocVQA/DocVQA/
+    ├── COCO-Caption2017/data/
+    ├── NoCaps/data/
+    ├── TextCaps/data/
+    ├── POPE/data/
+    ├── MME/data/
+    ├── MMStar/mmstar_lmms.parquet
+    ├── VizWiz-VQA/data/
+    ├── ScienceQA/ScienceQA-IMG/
+    ├── MMBench/en/
+    ├── VQAv2/data/
     └── MileBench/
 ```
 
@@ -81,9 +87,7 @@ for ds in textvqa gqa scienceqa; do
 done
 ```
 
-The teacher is the attention from generated answer tokens to image tokens,
-averaged over heads and answer tokens and normalized per layer (the zap
-teacher used by the released checkpoints).
+
 
 ### 2. Student training
 
@@ -99,27 +103,25 @@ python qvik/train/llava_onevision.py \
 # LLaVA-1.5
 python qvik/train/llava15.py \
   --teacher-root data/train/teacher/llava15 \
-  --epochs 20 \
+  --llava-path model/llava-v1.5-7b \
+  --epochs 15 \
   --output-dir ckpts/qvik_student_llava15
 ```
-
-The LLaVA-1.5 student scores decoder layer `l` from `hidden_states[l + offset]`
-(`--hidden-state-offset`, default 1 = output of layer `l`). The offset is saved
-in the checkpoint's `config.json` and read back at inference, so training,
-validation and evaluation always use the same index. Checkpoints without the
-field are loaded with offset 1. OneVision always uses offset 1.
 
 ### 3. Evaluation
 
 
-Results are written to `results/<model_tag>/<task>/`. Available tasks: `textvqa`, `chartqa`, `docvqa`, `gqa`,
-`coco_cap`, `nocaps`, `textcaps`
+Results are written to `results/<model_tag>/keep<keep_ratio>/<task>/`
+(`model_tag` is `llava15_lmms` or `onevision_lmms`). Available tasks: `textvqa`,
+`chartqa`, `docvqa`, `gqa`, `coco_cap`, `nocaps`, `textcaps`, `pope`, `mme`,
+`mmstar`, `vizwiz_vqa`, `scienceqa_img`, `mmbench_en_dev`, `vqav2_testdev`,
+`vqav2_test` (and their shards `vqav2_testdev_s0`-`s11`, `vqav2_test_s0`-`s11`).
 
 **lmms-eval (LLaVA-1.5)** 
 ```bash
 python qvik/eval/run_lmms_eval.py \
   --model lmms_llava15_student \
-  --model_args pretrained=model/llava-v1.5-7b,student_path=ckpts/v1/student_llava15_orig_vflow_1800_lr1e4_e15,keep_ratio=0.5,device=cuda:0 \
+  --model_args pretrained=model/llava-v1.5-7b,student_path=ckpts/qvik_student_llava15,keep_ratio=0.5,device=cuda:0 \
   --tasks textvqa,chartqa,docvqa,gqa,coco_cap,nocaps,textcaps \
   --batch_size 1 \
   --output_path results
@@ -129,7 +131,7 @@ python qvik/eval/run_lmms_eval.py \
 ```bash
 python qvik/eval/run_lmms_eval.py \
   --model lmms_onevision_student \
-  --model_args pretrained=model/llava-onevision-qwen2-7b-ov,student_path=ckpts/student_onevision,keep_ratio=0.5,device=cuda:0 \
+  --model_args pretrained=model/llava-onevision-qwen2-7b-ov,student_path=ckpts/qvik_student_onevision,keep_ratio=0.5,device=cuda:0 \
   --tasks textvqa,chartqa,docvqa,gqa,coco_cap,nocaps,textcaps \
   --batch_size 1 \
   --output_path results
@@ -141,37 +143,8 @@ for ds in ALFRED CLEVR-Change IEdit Spot-the-Diff; do
   python qvik/eval/milebench_onevision_student.py \
     --dataset $ds \
     --pretrained model/llava-onevision-qwen2-7b-ov \
-    --student_path ckpts/student_onevision \
+    --student_path ckpts/qvik_student_onevision \
     --keep_ratio 0.5
 done
 ```
 
-### Prefill mode (how the first answer token is produced)
-
-`prefill_mode` in `--model_args` applies to every task in both wrappers
-(`qvik/eval/prefill_mode.py`):
-
-- `prefill_mode=qvik` (default): prefill the prompt without its final token,
-  evict visual KVs, then feed the final prompt token through the compressed
-  cache. The first answer token therefore sees only the kept visual KVs.
-- `prefill_mode=origin`: prefill the full prompt, take the first answer token
-  from that full-attention pass, then evict. This is the usual post-prefill
-  KV-eviction protocol. On short-answer / multiple-choice benchmarks the first
-  token is often the whole answer, so this mode barely depends on `keep_ratio`.
-
-The stats JSON records `prefill_mode`. In both modes, text tokens after the
-image were computed with full image attention during prefill, so their KVs
-still carry visual information after the image KVs are evicted.
-
-### Keep-ratio basis
-
-- **OneVision:** `keep_ratio` is the fraction of image tokens kept.
-- **LLaVA-1.5, default `keep_ratio_basis=total`:** `keep_ratio` is the kept
-  fraction of the whole prompt, with text always kept. Therefore
-  `n_keep = max(1, n_img - (1 - keep_ratio) * prompt_len)`. Once `keep_ratio`
-  is at or below the prompt's text fraction (`n_text / prompt_len`), only one
-  image token survives. For example, the text fraction is about 0.08 on POPE
-  and about 0.19 on ScienceQA-IMG, so keep 0.05 keeps 1 of 576 image tokens on
-  both.
-- **LLaVA-1.5, `keep_ratio_basis=image`:** keeps `ceil(keep_ratio * n_img)`
-  image tokens, the same meaning as OneVision.
