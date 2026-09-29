@@ -48,4 +48,4 @@ def _patch_transformers_outputs() -> None:
 
 _patch_transformers_outputs()
 
-from .model import LlavaQwenForCausalLM  # noqa: E402,F401
+from .model import LlavaLlamaForCausalLM  # noqa: E402,F401
