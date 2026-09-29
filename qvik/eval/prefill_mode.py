@@ -63,16 +63,3 @@ def feed_last_token(
     )
     next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
     return out.past_key_values, next_token, int(prompt_len) + 1
-
-
-def extend_keep_masks(keep_masks: dict[int, torch.Tensor]) -> dict[int, torch.Tensor]:
-    """Append the final prompt token (always kept, text) to each per-layer mask.
-
-    After `feed_last_token` the cache holds prompt_len + 1 absolute positions;
-    code that rebuilds the cache layout from (prompt_len, keep_masks) -- e.g.
-    the text KV eviction manager -- needs masks of that length.
-    """
-    return {
-        layer_idx: torch.cat([mask, torch.ones(1, dtype=mask.dtype, device=mask.device)])
-        for layer_idx, mask in keep_masks.items()
-    }

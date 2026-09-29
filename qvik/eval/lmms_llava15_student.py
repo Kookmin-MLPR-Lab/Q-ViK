@@ -57,7 +57,6 @@ from .kv_decode_utils import (  # noqa: E402
 )
 from .prefill_mode import (  # noqa: E402
     DEFAULT_PREFILL_MODE,
-    extend_keep_masks,
     feed_last_token,
     normalize_prefill_mode,
     split_last_token,
@@ -569,7 +568,6 @@ class LmmsLlava15Student(lmms):
             past_kv, next_token, prompt_len = feed_last_token(
                 self._model, past_kv, last_token_id, prompt_len
             )
-            keep_masks = extend_keep_masks(keep_masks)
         answer_ids = greedy_decode_with_kv(
             self._model,
             past_kv,
