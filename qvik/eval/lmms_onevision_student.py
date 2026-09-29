@@ -23,7 +23,7 @@ REPO_ROOT = str(Path(__file__).resolve().parents[2])
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from kvpress.presses.visual_utility_student_onevision import VisualUtilityStudentOneVision
+from kvevict.presses.visual_utility_student_onevision import VisualUtilityStudentOneVision
 from .kv_decode_utils import greedy_decode_with_kv, trim_kv_cache_per_layer
 from .prefill_mode import (
     DEFAULT_PREFILL_MODE,
