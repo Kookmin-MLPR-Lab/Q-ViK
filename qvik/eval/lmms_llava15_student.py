@@ -238,7 +238,6 @@ class LmmsLlava15Student(lmms):
         print(f"[lmms-llava15-student] prefill_mode={self.prefill_mode}", file=sys.stderr, flush=True)
         self._rank = 0
         self._world_size = 1
-        self._reported_keep_budget = False
         self._img_keep_sum = 0
         self._img_total_sum = 0
         self._img_sample_count = 0

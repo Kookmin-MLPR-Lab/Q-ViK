@@ -46,7 +46,7 @@ data/
 │       ├── llava15/      # extracted teacher scores for LLaVA-1.5
 │       └── llava_onevision/  # extracted teacher scores for OneVision
 └── eval/
-    ├── textvqa_val/                  # TextVQA val (arrow shards)
+    ├── textvqa_val/                  # TextVQA val (or TextVQA/data/*.parquet)
     ├── GQA/                          # testdev_balanced_{instructions,images}
     ├── ChartQA/data/
     ├── DocVQA/DocVQA/
@@ -55,10 +55,10 @@ data/
     ├── TextCaps/data/
     ├── POPE/data/
     ├── MME/data/
-    ├── MMStar/mmstar_lmms.parquet
+    ├── MMStar/mmstar_lmms.parquet    # (or MMStar/mmstar.parquet)
     ├── VizWiz-VQA/data/
-    ├── ScienceQA/ScienceQA-IMG/
-    ├── MMBench/en/
+    ├── ScienceQA/ScienceQA-IMG/      # (or ScienceQA-IMG/)
+    ├── MMBench/en/                   # (or MMBench-EN/)
     ├── VQAv2/data/
     └── MileBench/
 ```

@@ -14,6 +14,7 @@ is run separately so it gets its own folder.
 """
 import contextlib
 import copy
+import glob
 import os
 import sys
 import tempfile
@@ -65,11 +66,30 @@ os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
 # so HF doesn't try to infer a (missing) train/test split layout.
 # All evaluation data lives under <project>/data/eval (override with QVIK_EVAL_DATA_ROOT).
 DATA_ROOT = Path(os.environ.get("QVIK_EVAL_DATA_ROOT", ZAP_ROOT / "data/eval"))
+
+
+def _on_disk(*candidates: tuple[str, str]) -> tuple[str, str]:
+    """Return the first (builder, relative glob) under DATA_ROOT that has files.
+
+    A few benchmarks are stored under different folder names on different
+    machines; each candidate is one known layout. Falls back to the first.
+    """
+    for builder, pattern in candidates:
+        if glob.glob(str(DATA_ROOT / pattern)):
+            return builder, str(DATA_ROOT / pattern)
+    builder, pattern = candidates[0]
+    return builder, str(DATA_ROOT / pattern)
+
+
+_TEXTVQA = _on_disk(("parquet", "TextVQA/data/validation-*.parquet"), ("arrow", "textvqa_val/data-*.arrow"))
+_MMSTAR = _on_disk(("parquet", "MMStar/mmstar.parquet"), ("parquet", "MMStar/mmstar_lmms.parquet"))
+_SCIENCEQA_IMG = _on_disk(("parquet", "ScienceQA-IMG/test-*.parquet"), ("parquet", "ScienceQA/ScienceQA-IMG/test-*.parquet"))
+_MMBENCH_EN = _on_disk(("parquet", "MMBench-EN/dev-*.parquet"), ("parquet", "MMBench/en/dev-*.parquet"))
 LOCAL_TASKS = {
     "textvqa": {
         "base": "textvqa/textvqa_val.yaml",
-        "dataset_path": "parquet",
-        "data_files": {"validation": str(DATA_ROOT / "TextVQA/data/validation-*.parquet")},
+        "dataset_path": _TEXTVQA[0],
+        "data_files": {"validation": _TEXTVQA[1]},
     },
     "chartqa": {
         "base": "chartqa/chartqa.yaml",
@@ -123,7 +143,7 @@ LOCAL_TASKS = {
     "mmstar": {
         "base": "mmstar/mmstar.yaml",
         "dataset_path": "parquet",
-        "data_files": {"val": str(DATA_ROOT / "MMStar/mmstar.parquet")},
+        "data_files": {"val": _MMSTAR[1]},
     },
     "vizwiz_vqa": {
         "base": "vizwiz_vqa/vizwiz_vqa_val.yaml",
@@ -134,13 +154,13 @@ LOCAL_TASKS = {
         "base": "scienceqa/scienceqa_img.yaml",
         "dataset_path": "parquet",
         "dataset_name": "ScienceQA-IMG",
-        "data_files": {"test": str(DATA_ROOT / "ScienceQA-IMG/test-*.parquet")},
+        "data_files": {"test": _SCIENCEQA_IMG[1]},
     },
     "mmbench_en_dev": {
         "base": "mmbench/mmbench_en_dev.yaml",
         "dataset_path": "parquet",
         "dataset_name": "en",
-        "data_files": {"dev": str(DATA_ROOT / "MMBench-EN/dev-*.parquet")},
+        "data_files": {"dev": _MMBENCH_EN[1]},
     },
 }
 
