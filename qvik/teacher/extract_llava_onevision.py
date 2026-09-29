@@ -7,7 +7,7 @@ manually with `output_attentions=True` to avoid OOM on the full attention tensor
 
 Per-sample output: ``<output_root>/<dataset>/<sample_id>.pt`` with schema:
 teacher_raw, teacher_norm, image_token_indices, question_token_indices,
-prompt_len_mm, T, n_img, trajectory_m.
+prompt_len_mm, T, n_img.
 """
 
 from __future__ import annotations
@@ -58,152 +58,6 @@ def build_scienceqa_prompt(problem: dict) -> str:
     return "\n".join(lines)
 
 
-_LLAVA_INSTRUCT_SUBSETS = [
-    "complex_reasoning_77k",
-    "conversation_58k",
-    "detail_23k",
-]
-
-
-def _load_llava_instruct_subset(
-    subset: str, hf_cache_dir: str | None
-) -> list[tuple[str, str, list]]:
-    from datasets import load_dataset
-
-    ds = load_dataset(
-        "liuhaotian/LLaVA-Instruct-150K", name=subset, split="train",
-        cache_dir=hf_cache_dir,
-    )
-    candidates: list[tuple[str, str, list]] = []
-    for i, rec in enumerate(ds):
-        sid = str(rec.get("id", f"{subset}_{i:06d}"))
-        convs = rec.get("conversations", [])
-        if not convs:
-            continue
-        human_turn = next((c for c in convs if c.get("from") == "human"), None)
-        if human_turn is None:
-            continue
-        question = human_turn.get("value", "").strip()
-        question = re.sub(r"<image>\n?", "", question).strip()
-        if not question:
-            continue
-        img = rec.get("image")
-        if img is None:
-            continue
-        if not isinstance(img, Image.Image):
-            try:
-                img = Image.fromarray(img).convert("RGB")
-            except Exception:
-                continue
-        else:
-            img = img.convert("RGB")
-        candidates.append((sid, question, [img]))
-    return candidates
-
-
-def load_llava_instruct_questions_hf(
-    n_samples: int, seed: int, hf_cache_dir: str | None = None
-) -> list[tuple[str, str, list]]:
-    """Load LLaVA-Instruct-150K with stratified sampling across 3 sub-categories.
-
-    Samples are drawn equally from complex_reasoning_77k, conversation_58k,
-    and detail_23k to avoid the natural skew (51% / 39% / 15%).
-    Falls back to loading the default split if named configs are unavailable.
-    """
-    rng = random.Random(seed)
-
-    # Try stratified loading first
-    try:
-        per_subset = max(1, n_samples // len(_LLAVA_INSTRUCT_SUBSETS))
-        all_candidates: list[tuple[str, str, list]] = []
-        for subset in _LLAVA_INSTRUCT_SUBSETS:
-            pool = _load_llava_instruct_subset(subset, hf_cache_dir)
-            rng.shuffle(pool)
-            all_candidates.extend(pool[:per_subset])
-        # Fill remainder from any subset to hit n_samples exactly
-        if len(all_candidates) < n_samples:
-            extra_pool: list[tuple[str, str, list]] = []
-            for subset in _LLAVA_INSTRUCT_SUBSETS:
-                extra_pool.extend(_load_llava_instruct_subset(subset, hf_cache_dir))
-            existing_ids = {s[0] for s in all_candidates}
-            extra_pool = [s for s in extra_pool if s[0] not in existing_ids]
-            rng.shuffle(extra_pool)
-            all_candidates.extend(extra_pool[: n_samples - len(all_candidates)])
-        rng.shuffle(all_candidates)
-        return all_candidates[:n_samples]
-    except Exception as e:
-        print(f"[warn] stratified load failed ({e}), falling back to default split", flush=True)
-
-    # Fallback: single split (original distribution)
-    from datasets import load_dataset
-
-    ds = load_dataset(
-        "liuhaotian/LLaVA-Instruct-150K", split="train", cache_dir=hf_cache_dir
-    )
-    candidates: list[tuple[str, str, list]] = []
-    for i, rec in enumerate(ds):
-        sid = str(rec.get("id", f"llava_instruct_{i:06d}"))
-        convs = rec.get("conversations", [])
-        if not convs:
-            continue
-        human_turn = next((c for c in convs if c.get("from") == "human"), None)
-        if human_turn is None:
-            continue
-        question = human_turn.get("value", "").strip()
-        question = re.sub(r"<image>\n?", "", question).strip()
-        if not question:
-            continue
-        img = rec.get("image")
-        if img is None:
-            continue
-        if not isinstance(img, Image.Image):
-            try:
-                img = Image.fromarray(img).convert("RGB")
-            except Exception:
-                continue
-        else:
-            img = img.convert("RGB")
-        candidates.append((sid, question, [img]))
-    rng.shuffle(candidates)
-    return candidates[:n_samples]
-
-
-def load_mmvet_questions_hf(
-    n_samples: int, seed: int, hf_cache_dir: str | None = None
-) -> list[tuple[str, str, list]]:
-    """Load MMVet from HuggingFace."""
-    from datasets import load_dataset
-
-    # lmms-lab/MMVet has a default split; try 'test' or default
-    try:
-        ds = load_dataset("lmms-lab/MMVet", split="test", cache_dir=hf_cache_dir)
-    except Exception:
-        ds = load_dataset("lmms-lab/MMVet", cache_dir=hf_cache_dir)
-        # pick the first available split
-        if hasattr(ds, "keys"):
-            ds = ds[next(iter(ds.keys()))]
-    candidates: list[tuple[str, str, list]] = []
-    for i, rec in enumerate(ds):
-        sid = str(rec.get("imagename", rec.get("id", f"mmvet_{i:04d}")))
-        question = str(rec.get("question", "")).strip()
-        if not question:
-            continue
-        img = rec.get("image")
-        if img is None:
-            continue
-        if not isinstance(img, Image.Image):
-            try:
-                img = Image.fromarray(img).convert("RGB")
-            except Exception:
-                continue
-        else:
-            img = img.convert("RGB")
-        candidates.append((sid, question, [img]))
-    rng = random.Random(seed)
-    rng.shuffle(candidates)
-    return candidates[:n_samples]
-
-
 def load_scienceqa_questions(
     problems_json: Path, images_root: Path, split: str, n_samples: int, seed: int
 ) -> list[tuple[str, str, list[str]]]:
@@ -251,42 +105,6 @@ def load_gqa_questions(
     return candidates[:n_samples]
 
 
-def load_st_vqa_questions(
-    data_json: Path, images_root: Path, n_samples: int, seed: int
-) -> list[tuple[str, str, list[str]]]:
-    """ST-VQA train_task_3 loader.
-
-    Schema (CVC UAB ST-VQA): a JSON file with key 'data' containing records
-    that include 'question', 'file_path' (or 'file_name'), 'answers'.
-    Image directory layout matches `file_path` relative to `images_root`.
-    """
-    with data_json.open() as f:
-        payload = json.load(f)
-    records = payload.get("data", payload) if isinstance(payload, dict) else payload
-    candidates: list[tuple[str, str, list[str]]] = []
-    for i, rec in enumerate(records):
-        question = str(rec.get("question", "")).strip()
-        if not question:
-            continue
-        rel = rec.get("file_path") or rec.get("file_name")
-        if not rel:
-            continue
-        img_path = images_root / rel
-        if not img_path.exists():
-            # Try a flat layout (file_name only) as fallback.
-            alt = images_root / Path(rel).name
-            if alt.exists():
-                img_path = alt
-            else:
-                continue
-        qid = str(rec.get("question_id", rec.get("id", f"st_vqa_{i:06d}")))
-        question = f"{question}\nAnswer the question using a single word or phrase."
-        candidates.append((qid, question, [str(img_path)]))
-    rng = random.Random(seed)
-    rng.shuffle(candidates)
-    return candidates[:n_samples]
-
-
 def load_textvqa_questions(
     data_json: Path, data_root: Path, n_samples: int, seed: int
 ) -> list[tuple[str, str, list[str]]]:
@@ -304,29 +122,6 @@ def load_textvqa_questions(
             continue
         qid = str(rec.get("question_id", rec.get("id", f"tvqa_{len(candidates):06d}")))
         candidates.append((qid, f"{question}\nAnswer the question using a single word or phrase.", [str(img_path)]))
-    rng = random.Random(seed)
-    rng.shuffle(candidates)
-    return candidates[:n_samples]
-
-
-def load_samples_from_json(
-    samples_json: Path, n_samples: int, seed: int
-) -> list[tuple[str, str, list[str]]]:
-    """Generic loader for pre-sampled datasets saved as samples.json.
-
-    JSON format: list of {sample_id, image_path, question, answer}.
-    """
-    with samples_json.open() as f:
-        records = json.load(f)
-    candidates: list[tuple[str, str, list[str]]] = []
-    for rec in records:
-        sid = str(rec["sample_id"])
-        question = str(rec["question"]).strip()
-        question = f"{question}\nAnswer the question using a single word or phrase."
-        img_path = rec["image_path"]
-        if not Path(img_path).exists():
-            continue
-        candidates.append((sid, question, [img_path]))
     rng = random.Random(seed)
     rng.shuffle(candidates)
     return candidates[:n_samples]
@@ -356,9 +151,6 @@ def _generate_with_per_step_attentions(
     attention_mask: torch.Tensor,
     image_indices: torch.Tensor,
     max_new_tokens: int,
-    do_sample: bool,
-    temperature: float,
-    top_p: float,
     eos_token_ids: set[int],
 ) -> tuple[torch.Tensor, int]:
     """Prefill (no attentions) then hook-based decode loop.
@@ -375,13 +167,7 @@ def _generate_with_per_step_attentions(
         return_dict=True,
     )
     past_kv = prefill_out.past_key_values
-    next_logits = prefill_out.logits[:, -1, :]
-
-    if do_sample:
-        probs = _top_p_sample_probs(next_logits / max(temperature, 1e-6), top_p)
-        next_token = torch.multinomial(probs, num_samples=1)
-    else:
-        next_token = next_logits.argmax(dim=-1, keepdim=True)
+    next_token = prefill_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
 
     # Collect decoder self-attention modules
     attn_layers = []
@@ -436,12 +222,7 @@ def _generate_with_per_step_attentions(
                     teacher[li] += captured[li]
             T += 1
 
-            next_logits = step_out.logits[:, -1, :]
-            if do_sample:
-                probs = _top_p_sample_probs(next_logits / max(temperature, 1e-6), top_p)
-                next_token = torch.multinomial(probs, num_samples=1)
-            else:
-                next_token = next_logits.argmax(dim=-1, keepdim=True)
+            next_token = step_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
 
             if int(next_token.item()) in eos_token_ids:
                 break
@@ -458,20 +239,6 @@ def _generate_with_per_step_attentions(
     gc.collect()
     torch.cuda.empty_cache()
     return teacher, T
-
-
-def _top_p_sample_probs(logits: torch.Tensor, top_p: float) -> torch.Tensor:
-    probs = torch.softmax(logits, dim=-1)
-    if top_p >= 1.0:
-        return probs
-    sorted_probs, sorted_idx = probs.sort(dim=-1, descending=True)
-    cum = sorted_probs.cumsum(dim=-1)
-    mask = cum > top_p
-    mask[..., 0] = False  # always keep top-1
-    sorted_probs = sorted_probs.masked_fill(mask, 0.0)
-    sorted_probs /= sorted_probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
-    out = torch.zeros_like(probs).scatter_(-1, sorted_idx, sorted_probs)
-    return out
 
 
 def infer_question_positions(prompt_len_mm: int, image_positions: torch.Tensor) -> torch.Tensor:
@@ -492,9 +259,6 @@ def collect_one(
     question: str,
     max_new_tokens: int,
     device: torch.device,
-    trajectory_m: int = 1,
-    trajectory_temperature: float = 0.7,
-    trajectory_top_p: float = 0.9,
     eps: float = 1e-8,
 ) -> dict:
     from qvik.llava_onevision.constants import IMAGE_TOKEN_INDEX
@@ -544,50 +308,32 @@ def collect_one(
         eos_token_ids = {int(t) for t in _eos}
     else:
         eos_token_ids = {151645, 151643}
-    M = max(1, trajectory_m)
-    use_sampling = M > 1
-
-    traj_scores: list[torch.Tensor] = []
-    t_lengths: list[int] = []
-    for _ in range(M):
-        score, T = _generate_with_per_step_attentions(
-            model=model,
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            image_indices=image_positions,
-            max_new_tokens=max_new_tokens,
-            do_sample=use_sampling,
-            temperature=trajectory_temperature,
-            top_p=trajectory_top_p,
-            eos_token_ids=eos_token_ids,
-        )
-        traj_scores.append(score)
-        t_lengths.append(T)
-
-    stacked = torch.stack(traj_scores, dim=0)
-    teacher = stacked.mean(dim=0)
+    teacher, T = _generate_with_per_step_attentions(
+        model=model,
+        inputs_embeds=inputs_embeds,
+        attention_mask=attention_mask,
+        image_indices=image_positions,
+        max_new_tokens=max_new_tokens,
+        eos_token_ids=eos_token_ids,
+    )
     teacher_norm = teacher / teacher.sum(dim=-1, keepdim=True).clamp_min(eps)
 
-    result = dict(
+    return dict(
         teacher_raw=teacher.to(torch.float16),
         teacher_norm=teacher_norm.to(torch.float16),
         image_token_indices=image_positions.to(torch.long),
         question_token_indices=question_positions.to(torch.long),
         prompt_len_mm=int(prompt_len_mm),
-        T=int(np.mean(t_lengths)),
+        T=int(T),
         n_img=int(n_img),
-        trajectory_m=M,
     )
-    if M > 1:
-        result["teacher_var"] = stacked.var(dim=0).to(torch.float16)
-    return result
 
 
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--model", default=str(Path(REPO_ROOT) / "model/llava-onevision-qwen2-7b-ov"))
-    p.add_argument("--dataset", required=True, choices=["scienceqa", "gqa", "textvqa", "st_vqa", "chartqa", "docvqa", "infovqa", "llava_instruct", "mmvet"])
-    p.add_argument("--n-samples", type=int, default=500)
+    p.add_argument("--dataset", required=True, choices=["scienceqa", "gqa", "textvqa"])
+    p.add_argument("--n-samples", type=int, default=600)
     p.add_argument("--max-new-tokens", type=int, default=64)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda:0")
@@ -602,37 +348,6 @@ def main() -> int:
     p.add_argument("--gqa-images-root", default=str(Path(REPO_ROOT) / "data/train/gqa/images"))
     p.add_argument("--textvqa-json", default=str(Path(REPO_ROOT) / "data/train/textvqa/train/data.json"))
     p.add_argument("--textvqa-data-root", default=str(Path(REPO_ROOT) / "data/train"))
-    p.add_argument(
-        "--st-vqa-json",
-        default=str(Path(REPO_ROOT) / "data/train/st_vqa/train_task_3.json"),
-    )
-    p.add_argument(
-        "--st-vqa-images-root",
-        default=str(Path(REPO_ROOT) / "data/train/st_vqa"),
-    )
-    p.add_argument(
-        "--chartqa-samples-json",
-        default=str(Path(REPO_ROOT) / "data/train/chartqa_train_sample/samples.json"),
-    )
-    p.add_argument(
-        "--docvqa-samples-json",
-        default=str(Path(REPO_ROOT) / "data/train/docvqa_train_sample/samples.json"),
-    )
-    p.add_argument(
-        "--infovqa-samples-json",
-        default=str(Path(REPO_ROOT) / "data/train/infovqa_train_sample/samples.json"),
-    )
-    p.add_argument("--max-image-size", type=int, default=0,
-                   help="If >0, resize images so the longest side <= this value before processing.")
-    p.add_argument("--hf-cache-dir", default=None,
-                   help="HuggingFace datasets cache directory for llava_instruct / mmvet.")
-    p.add_argument("--llava-instruct-samples-json",
-                   default=str(Path(REPO_ROOT) / "data/train/llava_instruct_sample/samples.json"))
-    p.add_argument("--mmvet-samples-json",
-                   default=str(Path(REPO_ROOT) / "data/train/mmvet_sample/samples.json"))
-    p.add_argument("--trajectory-m", type=int, default=1)
-    p.add_argument("--trajectory-temperature", type=float, default=0.7)
-    p.add_argument("--trajectory-top-p", type=float, default=0.9)
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
@@ -676,47 +391,10 @@ def main() -> int:
             n_samples=args.n_samples,
             seed=args.seed,
         )
-    elif args.dataset == "gqa":
+    else:  # gqa
         samples = load_gqa_questions(
             questions_json=Path(args.gqa_questions_json),
             images_root=Path(args.gqa_images_root),
-            n_samples=args.n_samples,
-            seed=args.seed,
-        )
-    elif args.dataset == "st_vqa":
-        samples = load_st_vqa_questions(
-            data_json=Path(args.st_vqa_json),
-            images_root=Path(args.st_vqa_images_root),
-            n_samples=args.n_samples,
-            seed=args.seed,
-        )
-    elif args.dataset == "chartqa":
-        samples = load_samples_from_json(
-            samples_json=Path(args.chartqa_samples_json),
-            n_samples=args.n_samples,
-            seed=args.seed,
-        )
-    elif args.dataset == "docvqa":
-        samples = load_samples_from_json(
-            samples_json=Path(args.docvqa_samples_json),
-            n_samples=args.n_samples,
-            seed=args.seed,
-        )
-    elif args.dataset == "infovqa":
-        samples = load_samples_from_json(
-            samples_json=Path(args.infovqa_samples_json),
-            n_samples=args.n_samples,
-            seed=args.seed,
-        )
-    elif args.dataset == "llava_instruct":
-        samples = load_samples_from_json(
-            samples_json=Path(args.llava_instruct_samples_json),
-            n_samples=args.n_samples,
-            seed=args.seed,
-        )
-    else:  # mmvet
-        samples = load_samples_from_json(
-            samples_json=Path(args.mmvet_samples_json),
             n_samples=args.n_samples,
             seed=args.seed,
         )
@@ -734,28 +412,9 @@ def main() -> int:
             saved += 1
             continue
         try:
-            def _resolve_image(src) -> Image.Image:
-                if isinstance(src, str):
-                    img = Image.open(src).convert("RGB")
-                else:
-                    img = src.convert("RGB")
-                if args.max_image_size > 0:
-                    w, h = img.size
-                    long_side = max(w, h)
-                    if long_side > args.max_image_size:
-                        scale = args.max_image_size / long_side
-                        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-                return img
-
-            def _stored(src) -> str:
-                return src if isinstance(src, str) else f"hf:{args.dataset}:{sid}"
-
-            if isinstance(img_paths, (list, tuple)) and len(img_paths) == 1:
-                image = _resolve_image(img_paths[0])
-                stored_path = _stored(img_paths[0])
-            else:
-                image = [_resolve_image(p) for p in img_paths]
-                stored_path = [_stored(p) for p in img_paths]
+            images = [Image.open(path).convert("RGB") for path in img_paths]
+            image = images[0] if len(images) == 1 else images
+            stored_path = img_paths[0] if len(img_paths) == 1 else list(img_paths)
             rec = collect_one(
                 model=model,
                 tokenizer=tokenizer,
@@ -764,9 +423,6 @@ def main() -> int:
                 question=question,
                 max_new_tokens=args.max_new_tokens,
                 device=device,
-                trajectory_m=args.trajectory_m,
-                trajectory_temperature=args.trajectory_temperature,
-                trajectory_top_p=args.trajectory_top_p,
             )
             rec.update(
                 sample_id=sid,
@@ -825,9 +481,6 @@ def main() -> int:
                 seed=args.seed,
                 max_new_tokens=args.max_new_tokens,
                 elapsed_seconds=elapsed,
-                trajectory_m=args.trajectory_m,
-                trajectory_temperature=args.trajectory_temperature,
-                trajectory_top_p=args.trajectory_top_p,
             ),
             indent=2,
         )

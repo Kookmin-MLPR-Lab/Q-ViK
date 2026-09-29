@@ -154,7 +154,7 @@ class LmmsLlava15Student(lmms):
     def __init__(
         self,
         pretrained: str = str(ZAP_ROOT / "model/llava-v1.5-7b"),
-        student_path: str = str(ZAP_ROOT / "ckpts/v1/student_llava15_orig_vflow_1800_lr1e4_e15"),
+        student_path: str = str(ZAP_ROOT / "ckpts/qvik_student_llava15"),
         vision_tower_path: str = "",
         keep_ratio: float = 0.5,
         keep_ratio_basis: str = "total",
@@ -170,7 +170,6 @@ class LmmsLlava15Student(lmms):
         grid_w: int = 24,
         stats_output_dir: str = "",
         prefill_mode: str = DEFAULT_PREFILL_MODE,
-        hidden_state_offset: int | str | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -209,9 +208,6 @@ class LmmsLlava15Student(lmms):
         if student_path:
             self.student = VisualUtilityStudent.from_pretrained(student_path)
             self.student = self.student.to(device=self._device, dtype=self._model_dtype).eval()
-            if hidden_state_offset not in (None, ""):
-                # Override for checkpoints whose training index is not recorded.
-                self.student.hidden_state_offset = int(hidden_state_offset)
             print(
                 f"[lmms-llava15-student] student={student_path} "
                 f"hidden_state_offset={self.student.hidden_state_offset}",

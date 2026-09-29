@@ -146,7 +146,6 @@ def main() -> int:
     p.add_argument("--overwrite", action="store_true", help="Replace an existing checkpoint in --output-dir.")
     p.add_argument("--val-ratio", type=float, default=0.1)
     p.add_argument("--log-every", type=int, default=50)
-    p.add_argument("--student-variant", choices=["full", "mlp_only", "cnn_only"], default="full")
     p.add_argument("--conv-dim", type=int, default=256)
     p.add_argument("--proj-dim", type=int, default=256)
     p.add_argument("--mlp-dim", type=int, default=512)
@@ -212,7 +211,6 @@ def main() -> int:
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, collate_fn=collate_single)
 
     student = VisualUtilityStudentOneVision(
-        variant=args.student_variant,
         conv_dim=args.conv_dim,
         proj_dim=args.proj_dim,
         mlp_dim=args.mlp_dim,
@@ -221,7 +219,7 @@ def main() -> int:
     ).to(device)
     n_params = sum(p.numel() for p in student.parameters() if p.requires_grad)
     print(
-        f"[student] variant={student.variant} layers={student.layer_indices} "
+        f"[student] layers={student.layer_indices} "
         f"params={n_params:,}",
         flush=True,
     )

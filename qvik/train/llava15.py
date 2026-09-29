@@ -341,7 +341,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-every", type=int, default=25)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing checkpoint in --output-dir.")
-    parser.add_argument("--student-variant", choices=["full", "mlp_only", "cnn_only"], default="full")
     parser.add_argument("--conv-dim", type=int, default=256)
     parser.add_argument("--proj-dim", type=int, default=256)
     parser.add_argument("--mlp-dim", type=int, default=512)
@@ -349,13 +348,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kernel-size", type=int, default=7)
     parser.add_argument("--grid-h", type=int, default=24)
     parser.add_argument("--grid-w", type=int, default=24)
-    parser.add_argument(
-        "--hidden-state-offset",
-        type=int,
-        choices=[0, 1],
-        default=1,
-        help="Score layer l from hidden_states[l + offset]; 1 = output of layer l.",
-    )
     return parser.parse_args()
 
 
@@ -409,7 +401,6 @@ def main() -> int:
     )
 
     student = VisualUtilityStudent(
-        variant=args.student_variant,
         conv_dim=args.conv_dim,
         proj_dim=args.proj_dim,
         mlp_dim=args.mlp_dim,
@@ -417,11 +408,10 @@ def main() -> int:
         kernel_size=args.kernel_size,
         grid_h=args.grid_h,
         grid_w=args.grid_w,
-        hidden_state_offset=args.hidden_state_offset,
     ).to(device)
     n_params = sum(p.numel() for p in student.parameters() if p.requires_grad)
     print(
-        f"[student] variant={student.variant} layers={student.layer_indices} "
+        f"[student] layers={student.layer_indices} "
         f"params={n_params:,}",
         flush=True,
     )

@@ -50,7 +50,7 @@ class LmmsOnevisionStudent(lmms):
     def __init__(
         self,
         pretrained: str = str(Path(REPO_ROOT) / "model/llava-onevision-qwen2-7b-ov"),
-        student_path: str = str(Path(REPO_ROOT) / "ckpts/student_onevision"),
+        student_path: str = str(Path(REPO_ROOT) / "ckpts/qvik_student_onevision"),
         keep_ratio: float = 0.5,
         device: str = "cuda:0",
         batch_size: int = 1,

@@ -206,10 +206,6 @@ def _collect_attention_two_pass(
     image_indices: torch.Tensor,
     prompt_len_mm: int,
     max_new_tokens: int,
-    do_sample: bool,
-    temperature: float,
-    top_p: float,
-    eps: float = 1e-8,
 ) -> tuple[torch.Tensor, int]:
     """Two-pass teacher extraction: generate answer, then forward pass with attention.
 
@@ -222,9 +218,9 @@ def _collect_attention_two_pass(
             **inputs,
             max_new_tokens=max_new_tokens,
             max_length=None,
-            do_sample=do_sample,
-            temperature=temperature if do_sample else 1.0,
-            top_p=top_p if do_sample else 1.0,
+            do_sample=False,
+            temperature=1.0,
+            top_p=1.0,
             top_k=0,
             num_beams=1,
             use_cache=True,
@@ -283,9 +279,6 @@ def collect_one(
     prompt: str,
     max_new_tokens: int,
     device: torch.device,
-    trajectory_m: int = 1,
-    trajectory_temperature: float = 0.7,
-    trajectory_top_p: float = 0.9,
     eps: float = 1e-8,
 ) -> dict:
     inputs = prepare_inputs(tokenizer, image_processor, prompt, image, device)
@@ -294,28 +287,13 @@ def collect_one(
     n_img = int(image_indices.numel())
     question_positions = infer_question_positions(prompt_len_mm, image_positions)
 
-    M = max(1, trajectory_m)
-    use_sampling = M > 1
-
-    traj_scores: list[torch.Tensor] = []
-    t_lengths: list[int] = []
-    for _ in range(M):
-        score, T = _collect_attention_two_pass(
-            model=model,
-            inputs=inputs,
-            image_indices=image_indices,
-            prompt_len_mm=prompt_len_mm,
-            max_new_tokens=max_new_tokens,
-            do_sample=use_sampling,
-            temperature=trajectory_temperature,
-            top_p=trajectory_top_p,
-            eps=eps,
-        )
-        traj_scores.append(score)
-        t_lengths.append(T)
-
-    stacked = torch.stack(traj_scores, dim=0)
-    teacher = stacked.mean(dim=0)
+    teacher, T = _collect_attention_two_pass(
+        model=model,
+        inputs=inputs,
+        image_indices=image_indices,
+        prompt_len_mm=prompt_len_mm,
+        max_new_tokens=max_new_tokens,
+    )
     teacher_norm = teacher / teacher.sum(dim=-1, keepdim=True).clamp_min(eps)
 
     return dict(
@@ -324,9 +302,8 @@ def collect_one(
         image_token_indices=image_positions.to(torch.long),
         question_token_indices=question_positions.to(torch.long),
         prompt_len_mm=int(prompt_len_mm),
-        T=int(np.mean(t_lengths)),
+        T=int(T),
         n_img=int(n_img),
-        trajectory_m=M,
     )
 
 
@@ -342,21 +319,6 @@ def _fmt(question: str) -> str:
 def _resolve(p: str) -> str | None:
     path = Path(p)
     return str(path) if path.exists() else None
-
-
-def load_samples_from_json(
-    samples_json: Path, n_samples: int, seed: int
-) -> list[tuple[str, str, str]]:
-    records = json.loads(samples_json.read_text())
-    candidates: list[tuple[str, str, str]] = []
-    for rec in records:
-        resolved = _resolve(rec["image_path"])
-        if resolved is None:
-            continue
-        candidates.append((str(rec["sample_id"]), _fmt(str(rec["question"]).strip()), resolved))
-    rng = random.Random(seed)
-    rng.shuffle(candidates)
-    return candidates[:n_samples]
 
 
 def load_scienceqa_samples(
@@ -431,7 +393,7 @@ def main() -> int:
     p.add_argument(
         "--dataset",
         required=True,
-        choices=["scienceqa", "gqa", "textvqa", "llava_instruct"],
+        choices=["scienceqa", "gqa", "textvqa"],
     )
     p.add_argument("--n-samples", type=int, default=600)
     p.add_argument("--max-new-tokens", type=int, default=64)
@@ -443,12 +405,8 @@ def main() -> int:
     p.add_argument("--split", default="train")
     p.add_argument("--gqa-questions-json", default=str(PROJECT_ROOT / "data/train/gqa/train_balanced_questions_600.json"))
     p.add_argument("--gqa-images-root", default=str(PROJECT_ROOT / "data/train/gqa/images"))
-    p.add_argument("--llava-instruct-samples-json", default=str(PROJECT_ROOT / "data/train/llava_instruct_sample/samples.json"))
     p.add_argument("--textvqa-json", default=str(PROJECT_ROOT / "data/train/textvqa/train/data.json"))
     p.add_argument("--textvqa-data-root", default=str(PROJECT_ROOT / "data/train"))
-    p.add_argument("--trajectory-m", type=int, default=1)
-    p.add_argument("--trajectory-temperature", type=float, default=0.7)
-    p.add_argument("--trajectory-top-p", type=float, default=0.9)
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
@@ -469,13 +427,9 @@ def main() -> int:
         samples = load_gqa_samples(
             Path(args.gqa_questions_json), Path(args.gqa_images_root), args.n_samples, args.seed
         )
-    elif args.dataset == "textvqa":
+    else:  # textvqa
         samples = load_textvqa_samples(
             Path(args.textvqa_json), Path(args.textvqa_data_root), args.n_samples, args.seed
-        )
-    else:  # llava_instruct
-        samples = load_samples_from_json(
-            Path(args.llava_instruct_samples_json), args.n_samples, args.seed
         )
     print(f"[info] dataset={args.dataset} loaded {len(samples)} samples", flush=True)
 
@@ -500,9 +454,6 @@ def main() -> int:
                 prompt=prompt,
                 max_new_tokens=args.max_new_tokens,
                 device=device,
-                trajectory_m=args.trajectory_m,
-                trajectory_temperature=args.trajectory_temperature,
-                trajectory_top_p=args.trajectory_top_p,
             )
             rec.update(
                 sample_id=sid,

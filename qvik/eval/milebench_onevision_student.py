@@ -94,7 +94,7 @@ def main():
     )
     parser.add_argument(
         "--student_path",
-        default=str(REPO_ROOT / "ckpts" / "student_onevision"),
+        default=str(REPO_ROOT / "ckpts" / "qvik_student_onevision"),
     )
     parser.add_argument("--keep_ratio", type=float, default=0.5)
     parser.add_argument("--output_dir", default=DEFAULT_OUTPUT_DIR)
