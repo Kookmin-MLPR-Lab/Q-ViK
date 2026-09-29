@@ -2,7 +2,7 @@
 
 OneVision uses AnyRes image tokenization, so the per-sample image-token count
 N_I varies and is NOT a multiple of any fixed (grid_h, grid_w). The 2D CNN
-branch from `visual_utility_student.py` cannot be reused; here we replace it
+branch from `visual_utility_student_llava15.py` cannot be reused; here we replace it
 with a 1D ConvNeXt-style stack along the image-token sequence.
 
 Per-layer student (`VisualUtilityStudentLayerOneVision`):
@@ -245,7 +245,7 @@ def pairwise_ranking_loss(
 ) -> torch.Tensor:
     """Margin-ranking loss between pred-top and pred-bottom selected by target.
 
-    Mirrors `kvpress.presses.visual_utility_student.pairwise_ranking_loss`.
+    Mirrors `kvpress.presses.visual_utility_student_llava15.pairwise_ranking_loss`.
     """
     if pred.shape != target.shape or pred.ndim != 2:
         raise ValueError(

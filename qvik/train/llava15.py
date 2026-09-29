@@ -70,7 +70,7 @@ from qvik.llava15.constants import IMAGE_TOKEN_INDEX  # noqa: E402
 from qvik.llava15.mm_utils import tokenizer_image_token  # noqa: E402
 from qvik.llava15.model.builder import load_pretrained_model  # noqa: E402
 
-from kvpress.presses.visual_utility_student import (  # noqa: E402
+from kvpress.presses.visual_utility_student_llava15 import (  # noqa: E402
     VisualUtilityStudent,
     pairwise_ranking_loss,
 )

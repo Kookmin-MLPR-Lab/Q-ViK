@@ -11,3 +11,4 @@ data/train/textvqa
 data/train/teacher/
 ckpts/
 /data
+.ipynb_checkpoints/
