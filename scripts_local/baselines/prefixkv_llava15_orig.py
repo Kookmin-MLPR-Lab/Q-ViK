@@ -7,10 +7,16 @@ Uses the official ``llava`` package, ``patch_llama_attention_forward`` and
 prompt (text and image); the cache is re-trimmed after every decode step.
 ``ratio`` is the compression ratio, so keep_ratio=0.2 -> ratio=0.8.
 Settings follow the official eval_rouge.py: start_size=1, recent_size=2047,
-bfloat16, greedy decoding. As in the official code no position_ids reach the
-model (the official LlavaLlamaForCausalLM.forward does not accept them), so
-transformers 4.33 LlamaModel numbers new tokens from the *compressed* cache
-length.
+bfloat16, greedy decoding.
+
+Positions (deviation from the official code, chosen 2026-10-08): the official
+LlavaLlamaForCausalLM.forward takes no position_ids, so transformers numbers
+every token after the prefill from the *compressed* cache length. The official
+pipeline hides this because its first answer token comes from the uncompressed
+prefill; with delayed replay the first token is already mis-positioned and the
+model collapses (keep 0.5 MME: 16/16 empty answers, MME 441). Tokens after the
+prefill therefore use logical (uncompressed) positions, as LOOK-M and Q-ViK do.
+Token selection, per-layer budgets and per-step trimming are unchanged.
 
 The decode loop mirrors cache_generate.greedy_search (forward with
 output_attentions=True, then ``kv_cache(past, num_of_token, attentions)``).
@@ -173,10 +179,26 @@ class PrefixKVLlava15Orig(lmms):
 
     def _step(self, cache, num_of_token, **inputs):
         """One forward + official PrefixKV trim, as in cache_generate.greedy_search."""
-        outputs = self._model(**inputs, use_cache=True, output_attentions=True, return_dict=True)
-        num_of_token += outputs.logits.shape[1]
-        past_key_values = cache(outputs.past_key_values, num_of_token, outputs.attentions)
-        next_token = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+        if "past_key_values" in inputs:
+            # Text-only step: go through the decoder directly so a logical
+            # position can be passed (the official LLaVA forward has no
+            # position_ids argument).
+            out = self._model.model(
+                input_ids=inputs["input_ids"],
+                past_key_values=inputs["past_key_values"],
+                position_ids=torch.full((1, 1), num_of_token, dtype=torch.long, device=self._device),
+                use_cache=True,
+                output_attentions=True,
+                return_dict=True,
+            )
+            logits = self._model.lm_head(out.last_hidden_state)
+            past, attentions = out.past_key_values, out.attentions
+        else:
+            out = self._model(**inputs, use_cache=True, output_attentions=True, return_dict=True)
+            logits, past, attentions = out.logits, out.past_key_values, out.attentions
+        num_of_token += logits.shape[1]
+        past_key_values = cache(past, num_of_token, attentions)
+        next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
         return past_key_values, next_token, num_of_token
 
     @torch.inference_mode()

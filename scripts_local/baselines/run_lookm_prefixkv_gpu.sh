@@ -11,9 +11,13 @@ OUT="${OUT:-${QVIK_ROOT}/results/baselines_orig_llava15}"
 export CUDA_VISIBLE_DEVICES="${GPU:?set GPU}"
 export HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TOKENIZERS_PARALLELISM=false
 export HF_DATASETS_CACHE=/workspace/nips/.hf_cache/datasets TMPDIR=/workspace/nips/.tmp
+# No GPT key here: MMBench's GPT fallback (used when the local option regex
+# fails) can only fail. Point it at a closed local port so it fails instantly
+# instead of waiting on api.openai.com 401s; the item is scored the same way.
+export OPENAI_API_URL="http://127.0.0.1:9/v1/chat/completions"
 
-MC_TASKS="mme,mmbench_en_dev,mmstar,pope,vizwiz_vqa,scienceqa_img"
-FREE_TASKS="textvqa,gqa,docvqa,chartqa,coco_cap,nocaps,textcaps"
+MC_TASKS="${MC_TASKS:-mme,mmbench_en_dev,mmstar,pope,vizwiz_vqa,scienceqa_img}"
+FREE_TASKS="${FREE_TASKS:-textvqa,gqa,docvqa,chartqa,coco_cap,nocaps,textcaps}"
 
 cd "${QVIK_ROOT}"
 for method in ${METHODS:-lookm_llava15_orig prefixkv_llava15_orig}; do

@@ -90,6 +90,15 @@ doc += ["## LLaVA-1.5-7B (keep ratio over all prompt tokens)", "",
         "- **LOOK-M / PrefixKV**: original code (LOOK-M `text_prior_pivot_merge`, hh = recent = keep/2; official PrefixKV with "
         "`confs/prefixkv_llava-v1.5-7b_{1-keep}.json`), evicting text and image tokens. Same protocol as ours: MC delayed, free-form full prefill. "
         "Wrappers: `scripts_local/baselines/`.",
+        "- **PrefixKV positions**: tokens after the prefill use logical (uncompressed) positions. The official code numbers them from the "
+        "compressed cache length, which with delayed replay collapses the first answer token (keep 0.5 MME 441, mostly empty answers). "
+        "Token selection, per-layer budgets and per-step trimming are the official ones.",
+        "- **PrefixKV VizWiz**: low because PrefixKV also evicts the instruction text; it answers \"Unknown\" instead of the required "
+        "\"Unanswerable\" (keep 0.5: 2186 × \"unknown\" vs 539 × \"unanswerable\"; LOOK-M keep 0.5: 2279 × \"unanswerable\"). "
+        "At keep 0.2, 1872/4319 answers are empty and some repeat (\"yes yes yes …\").",
+        "- **PrefixKV keep 0.2**: after the first token the per-step trimming makes answers repeat until max_new_tokens. "
+        "POPE 18.0: 6922/9000 answers are \"no no no …\" / \"yes yes yes …\", and lmms-eval's POPE scorer is exact match, so they count as wrong. "
+        "The free-form drop (TextVQA 15.7, ChartQA 2.4) has the same cause.",
         "- **Full Cache**: keep 1.0 with the Q-ViK wrapper (no eviction).", ""]
 fc = merged(([f"{l15}/keep1.0"], TASKS))
 doc.append(render("Retain 100%", [("Full Cache", fc)]))

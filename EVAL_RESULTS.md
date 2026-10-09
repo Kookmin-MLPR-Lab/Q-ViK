@@ -51,6 +51,9 @@ everything else is accuracy / ANLS / relaxed accuracy (×100). `--` = not run, `
 - **Q-ViK (ours)**: checkpoint `ckpts/qvik_student_llava15_20261003`; image tokens only are evicted, budget = keep × total tokens. MC tasks delayed replay, free-form full prefill.
 - **Q-ViK (ours, all delayed)**: same checkpoint, delayed replay on every task (pipeline eval).
 - **LOOK-M / PrefixKV**: original code (LOOK-M `text_prior_pivot_merge`, hh = recent = keep/2; official PrefixKV with `confs/prefixkv_llava-v1.5-7b_{1-keep}.json`), evicting text and image tokens. Same protocol as ours: MC delayed, free-form full prefill. Wrappers: `scripts_local/baselines/`.
+- **PrefixKV positions**: tokens after the prefill use logical (uncompressed) positions. The official code numbers them from the compressed cache length, which with delayed replay collapses the first answer token (keep 0.5 MME 441, mostly empty answers). Token selection, per-layer budgets and per-step trimming are the official ones.
+- **PrefixKV VizWiz**: low because PrefixKV also evicts the instruction text; it answers "Unknown" instead of the required "Unanswerable" (keep 0.5: 2186 × "unknown" vs 539 × "unanswerable"; LOOK-M keep 0.5: 2279 × "unanswerable"). At keep 0.2, 1872/4319 answers are empty and some repeat ("yes yes yes …").
+- **PrefixKV keep 0.2**: after the first token the per-step trimming makes answers repeat until max_new_tokens. POPE 18.0: 6922/9000 answers are "no no no …" / "yes yes yes …", and lmms-eval's POPE scorer is exact match, so they count as wrong. The free-form drop (TextVQA 15.7, ChartQA 2.4) has the same cause.
 - **Full Cache**: keep 1.0 with the Q-ViK wrapper (no eviction).
 
 ### Retain 100%
@@ -64,14 +67,14 @@ everything else is accuracy / ANLS / relaxed accuracy (×100). `--` = not run, `
 | Method | MME | MMB_EN | MMStar | POPE | VizWiz | SQA_I | TextVQA | GQA | DocVQA | ChartQA | COCO | NoCaps | TextCaps |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | LOOK-M | 1521.8 | 64.0 | 33.1 | 86.7 | 54.8 | 69.4 | 45.6 | 61.8 | 27.4 | 17.9 | 55.7 / 110.2 | 59.4 / 105.1 | 47.3 / 98.0 |
-| PrefixKV | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ |
+| PrefixKV | 1508.0 | 60.0 | 34.7 | 86.4 | 23.4 | 67.1 | 45.9 | 61.9 | 28.6 | 17.1 | 56.0 / 113.4 | 59.8 / 106.6 | 47.3 / 98.2 |
 | Q-ViK (ours) | 1506.9 | 64.3 | 33.2 | 86.8 | 54.7 | 69.3 | 46.0 | 62.0 | 28.2 | 17.9 | 55.7 / 110.3 | 59.2 / 104.1 | 47.3 / 99.0 |
 
 ### Retain 20%
 
 | Method | MME | MMB_EN | MMStar | POPE | VizWiz | SQA_I | TextVQA | GQA | DocVQA | ChartQA | COCO | NoCaps | TextCaps |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| LOOK-M | 1513.0 | 64.0 | 34.5 | 86.3 | 55.8 | 69.2 | 43.1 | 61.8 | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ |
-| PrefixKV | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ |
+| LOOK-M | 1513.0 | 64.0 | 34.5 | 86.3 | 55.8 | 69.2 | 43.1 | 61.8 | 23.6 | 16.7 | 56.1 / 113.1 | 59.0 / 104.7 | 46.0 / 89.0 |
+| PrefixKV | 1428.2 | 43.1 | 33.2 | 18.0 | 5.9 | 52.4 | 15.7 | 30.8 | 9.6 | 2.4 | 37.3 / 67.3 | 38.0 / 57.8 | 28.9 / 43.7 |
 | Q-ViK (ours) | 1504.1 | 64.4 | 33.1 | 86.5 | 54.6 | 69.2 | 45.5 | 61.9 | 25.9 | 17.3 | 55.6 / 110.2 | 58.0 / 99.3 | 46.7 / 97.6 |
 | Q-ViK (ours, all delayed) | 1504.1 | 64.4 | 33.1 | 86.5 | 54.6 | 69.2 | 45.5 | 61.3 | 25.6 | 16.8 | 55.5 / 108.8 | 57.8 / 98.1 | 46.6 / 97.3 |
