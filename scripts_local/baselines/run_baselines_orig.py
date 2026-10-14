@@ -16,6 +16,7 @@ LMMS_EVAL_ROOT = Path("/workspace/nips/VFlowOpt/src/lmms_eval-0.2.4")
 sys.path.insert(0, str(LMMS_EVAL_ROOT))
 sys.path.insert(0, str(QVIK_ROOT))
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent))
 
 model = sys.argv[sys.argv.index("--model") + 1]
 WRAPPERS = {
@@ -23,12 +24,16 @@ WRAPPERS = {
     "prefixkv_llava15_orig": ("prefixkv_llava15_orig", "PrefixKVLlava15Orig"),
     "fastv_llava15_orig": ("fastv_llava15_orig", "FastVLlava15Orig"),
     "sparsevlm_llava15_orig": ("sparsevlm_llava15_orig", "SparseVLMLlava15Orig"),
+    "lmms_llava15_oracle": ("oracle_llava15", "LmmsLlava15Oracle"),
 }
 mod_name, cls_name = WRAPPERS[model]
 wrapper = __import__(mod_name)
 
-for stub in ("qvik.eval.lmms_llava15_student", "qvik.eval.lmms_onevision_student"):
-    sys.modules[stub] = types.ModuleType(stub)
+# The oracle *is* a Q-ViK wrapper (newer transformers env); only stub the
+# student modules for the original-code baselines.
+if model != "lmms_llava15_oracle":
+    for stub in ("qvik.eval.lmms_llava15_student", "qvik.eval.lmms_onevision_student"):
+        sys.modules[stub] = types.ModuleType(stub)
 sys.modules[f"lmms_eval.models.{model}"] = wrapper
 
 from lmms_eval.models import AVAILABLE_MODELS  # noqa: E402
