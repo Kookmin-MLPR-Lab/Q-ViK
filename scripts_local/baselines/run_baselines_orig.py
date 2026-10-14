@@ -4,7 +4,7 @@ harness (same local task YAMLs, scoring and results layout as the Q-ViK runs).
 
 Q-ViK's runner imports its own student wrappers at startup; those need a newer
 transformers than the 4.33.1 both baselines pin, so they are stubbed out here.
-Usage: python run_baselines_orig.py --model lookm_llava15_orig|prefixkv_llava15_orig ...
+Usage: python run_baselines_orig.py --model lookm_llava15_orig|prefixkv_llava15_orig|fastv_llava15_orig|sparsevlm_llava15_orig ...
 """
 import sys
 import types
@@ -21,6 +21,8 @@ model = sys.argv[sys.argv.index("--model") + 1]
 WRAPPERS = {
     "lookm_llava15_orig": ("lookm_llava15_orig", "LookMLlava15Orig"),
     "prefixkv_llava15_orig": ("prefixkv_llava15_orig", "PrefixKVLlava15Orig"),
+    "fastv_llava15_orig": ("fastv_llava15_orig", "FastVLlava15Orig"),
+    "sparsevlm_llava15_orig": ("sparsevlm_llava15_orig", "SparseVLMLlava15Orig"),
 }
 mod_name, cls_name = WRAPPERS[model]
 wrapper = __import__(mod_name)

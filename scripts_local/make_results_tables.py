@@ -99,12 +99,25 @@ doc += ["## LLaVA-1.5-7B (keep ratio over all prompt tokens)", "",
         "- **PrefixKV keep 0.2**: after the first token the per-step trimming makes answers repeat until max_new_tokens. "
         "POPE 18.0: 6922/9000 answers are \"no no no …\" / \"yes yes yes …\", and lmms-eval's POPE scorer is exact match, so they count as wrong. "
         "The free-form drop (TextVQA 15.7, ChartQA 2.4) has the same cause.",
+        "- **LOOK-M note**: the original `text_prior_pivot_merge` never evicts text in practice (text scores stay >= 0 and "
+        "`mask = hh_score >= 0` keeps them); only image tokens are evicted.",
+        "- **FastV / SparseVLM**: released code (FastV K=3 via its lmms-eval `fastv_kvcache.py`; SparseVLM main branch, default "
+        "version, pruning after layers 2/6/15 with token merging). They prune image tokens inside the LLM during prefill, so no "
+        "delayed replay is needed. Budget: the KV cache **averaged over all 32 layers** is keep × total tokens — FastV solves the "
+        "image tokens kept from layer 3 on, SparseVLM scales the repo's 300/200/110 schedule (cluster tokens included); the measured "
+        "per-layer KV is logged in `*_keep_ratio_stats.json`. FastV fix: the extra layer-2 pass that reads the attention map no "
+        "longer writes the KV cache (the original appended it twice).",
+        "- **Budget over-run at 20%**: text tokens alone exceed 20% on long-prompt tasks, so FastV/SparseVLM keep (almost) no image "
+        "tokens and still run over. Measured mean KV (FastV / SparseVLM): MMB_EN 0.250 / 0.255, MMStar 0.239 / 0.245, "
+        "SQA_I 0.257 / 0.262, VizWiz 0.204 / 0.209; every other task 0.200–0.201. At 50% all tasks hit 0.500.",
         "- **Full Cache**: keep 1.0 with the Q-ViK wrapper (no eviction).", ""]
 fc = merged(([f"{l15}/keep1.0"], TASKS))
 doc.append(render("Retain 100%", [("Full Cache", fc)]))
 for keep, pct in (("0.5", "50%"), ("0.2", "20%")):
     rows = [("LOOK-M", merged(([f"{base}/lookm_llava15_orig/keep{keep}"], TASKS))),
             ("PrefixKV", merged(([f"{base}/prefixkv_llava15_orig/keep{keep}"], TASKS))),
+            ("FastV", merged(([f"{base}/fastv_llava15_orig/keep{keep}"], TASKS))),
+            ("SparseVLM", merged(([f"{base}/sparsevlm_llava15_orig/keep{keep}"], TASKS))),
             ("Q-ViK (ours)", merged(([f"{l15_pipe}/keep{keep}"], MC), ([f"{l15}/keep{keep}"], FREE)))]
     if keep == "0.2":
         rows.append(("Q-ViK (ours, all delayed)", merged(([f"{l15_pipe}/keep{keep}"], TASKS))))

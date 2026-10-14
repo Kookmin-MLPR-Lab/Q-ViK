@@ -54,6 +54,9 @@ everything else is accuracy / ANLS / relaxed accuracy (×100). `--` = not run, `
 - **PrefixKV positions**: tokens after the prefill use logical (uncompressed) positions. The official code numbers them from the compressed cache length, which with delayed replay collapses the first answer token (keep 0.5 MME 441, mostly empty answers). Token selection, per-layer budgets and per-step trimming are the official ones.
 - **PrefixKV VizWiz**: low because PrefixKV also evicts the instruction text; it answers "Unknown" instead of the required "Unanswerable" (keep 0.5: 2186 × "unknown" vs 539 × "unanswerable"; LOOK-M keep 0.5: 2279 × "unanswerable"). At keep 0.2, 1872/4319 answers are empty and some repeat ("yes yes yes …").
 - **PrefixKV keep 0.2**: after the first token the per-step trimming makes answers repeat until max_new_tokens. POPE 18.0: 6922/9000 answers are "no no no …" / "yes yes yes …", and lmms-eval's POPE scorer is exact match, so they count as wrong. The free-form drop (TextVQA 15.7, ChartQA 2.4) has the same cause.
+- **LOOK-M note**: the original `text_prior_pivot_merge` never evicts text in practice (text scores stay >= 0 and `mask = hh_score >= 0` keeps them); only image tokens are evicted.
+- **FastV / SparseVLM**: released code (FastV K=3 via its lmms-eval `fastv_kvcache.py`; SparseVLM main branch, default version, pruning after layers 2/6/15 with token merging). They prune image tokens inside the LLM during prefill, so no delayed replay is needed. Budget: the KV cache **averaged over all 32 layers** is keep × total tokens — FastV solves the image tokens kept from layer 3 on, SparseVLM scales the repo's 300/200/110 schedule (cluster tokens included); the measured per-layer KV is logged in `*_keep_ratio_stats.json`. FastV fix: the extra layer-2 pass that reads the attention map no longer writes the KV cache (the original appended it twice).
+- **Budget over-run at 20%**: text tokens alone exceed 20% on long-prompt tasks, so FastV/SparseVLM keep (almost) no image tokens and still run over. Measured mean KV (FastV / SparseVLM): MMB_EN 0.250 / 0.255, MMStar 0.239 / 0.245, SQA_I 0.257 / 0.262, VizWiz 0.204 / 0.209; every other task 0.200–0.201. At 50% all tasks hit 0.500.
 - **Full Cache**: keep 1.0 with the Q-ViK wrapper (no eviction).
 
 ### Retain 100%
@@ -68,6 +71,8 @@ everything else is accuracy / ANLS / relaxed accuracy (×100). `--` = not run, `
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | LOOK-M | 1521.8 | 64.0 | 33.1 | 86.7 | 54.8 | 69.4 | 45.6 | 61.8 | 27.4 | 17.9 | 55.7 / 110.2 | 59.4 / 105.1 | 47.3 / 98.0 |
 | PrefixKV | 1508.0 | 60.0 | 34.7 | 86.4 | 23.4 | 67.1 | 45.9 | 61.9 | 28.6 | 17.1 | 56.0 / 113.4 | 59.8 / 106.6 | 47.3 / 98.2 |
+| FastV | 1482.7 | 63.7 | 33.3 | 83.7 | 54.8 | 69.0 | 44.7 | 59.1 | 23.8 | 17.7 | 55.6 / 109.8 | 59.3 / 104.4 | 47.6 / 100.1 |
+| SparseVLM | 1459.9 | 63.7 | 34.8 | 86.9 | 53.7 | 68.5 | 45.5 | 60.7 | 27.1 | 17.4 | 55.5 / 109.5 | 58.8 / 102.5 | 47.4 / 97.9 |
 | Q-ViK (ours) | 1506.9 | 64.3 | 33.2 | 86.8 | 54.7 | 69.3 | 46.0 | 62.0 | 28.2 | 17.9 | 55.7 / 110.3 | 59.2 / 104.1 | 47.3 / 99.0 |
 
 ### Retain 20%
@@ -76,5 +81,7 @@ everything else is accuracy / ANLS / relaxed accuracy (×100). `--` = not run, `
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | LOOK-M | 1513.0 | 64.0 | 34.5 | 86.3 | 55.8 | 69.2 | 43.1 | 61.8 | 23.6 | 16.7 | 56.1 / 113.1 | 59.0 / 104.7 | 46.0 / 89.0 |
 | PrefixKV | 1428.2 | 43.1 | 33.2 | 18.0 | 5.9 | 52.4 | 15.7 | 30.8 | 9.6 | 2.4 | 37.3 / 67.3 | 38.0 / 57.8 | 28.9 / 43.7 |
+| FastV | 762.2 | 20.6 | 22.6 | 57.4 | 50.5 | 64.3 | 19.5 | 42.0 | 11.4 | 12.4 | 40.9 / 48.2 | 44.6 / 45.5 | 36.5 / 46.0 |
+| SparseVLM | 936.7 | 22.9 | 23.2 | 72.7 | 49.2 | 63.0 | 22.8 | 46.2 | 12.3 | 12.7 | 43.5 / 53.5 | 45.2 / 41.0 | 37.0 / 37.6 |
 | Q-ViK (ours) | 1504.1 | 64.4 | 33.1 | 86.5 | 54.6 | 69.2 | 45.5 | 61.9 | 25.9 | 17.3 | 55.6 / 110.2 | 58.0 / 99.3 | 46.7 / 97.6 |
 | Q-ViK (ours, all delayed) | 1504.1 | 64.4 | 33.1 | 86.5 | 54.6 | 69.2 | 45.5 | 61.3 | 25.6 | 16.8 | 55.5 / 108.8 | 57.8 / 98.1 | 46.6 / 97.3 |
