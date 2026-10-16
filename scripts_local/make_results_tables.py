@@ -112,7 +112,7 @@ doc += ["## LLaVA-1.5-7B (keep ratio over all prompt tokens)", "",
         "SQA_I 0.257 / 0.262, VizWiz 0.204 / 0.209; every other task 0.200–0.201. At 50% all tasks hit 0.500.",
         "- **Oracle**: Q-ViK's wrapper with the student scores replaced by the teacher signal computed on the eval sample itself "
         "(full-cache greedy answer → answer-to-image attention per layer, mean over heads and answer tokens; same definition as "
-        "`qvik/teacher/extract_llava15.py`). Same total budget, per-layer top-k and delayed replay as ours. MC tasks only "
+        "`qvik/teacher/extract_llava15.py`). Same total budget, per-layer top-k and protocol as ours (MC delayed replay, free-form full prefill) "
         "(`scripts_local/oracle_llava15.py`).",
         "- **Full Cache**: keep 1.0 with the Q-ViK wrapper (no eviction).", ""]
 fc = merged(([f"{l15}/keep1.0"], TASKS))
@@ -123,7 +123,7 @@ for keep, pct in (("0.5", "50%"), ("0.2", "20%")):
             ("FastV", merged(([f"{base}/fastv_llava15_orig/keep{keep}"], TASKS))),
             ("SparseVLM", merged(([f"{base}/sparsevlm_llava15_orig/keep{keep}"], TASKS))),
             ("Q-ViK (ours)", merged(([f"{l15_pipe}/keep{keep}"], MC), ([f"{l15}/keep{keep}"], FREE))),
-            ("Oracle", merged(([f"{R}/oracle_llava15/lmms_llava15_oracle/keep{keep}"], MC)))]
+            ("Oracle", merged(([f"{R}/oracle_llava15/lmms_llava15_oracle/keep{keep}"], TASKS)))]
     if keep == "0.2":
         rows.append(("Q-ViK (ours, all delayed)", merged(([f"{l15_pipe}/keep{keep}"], TASKS))))
     pending = {"LOOK-M": TASKS, "PrefixKV": TASKS}
