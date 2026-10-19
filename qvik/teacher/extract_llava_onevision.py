@@ -17,7 +17,6 @@ import json
 import random
 import re
 import sys
-import time
 from pathlib import Path
 
 import numpy as np
@@ -403,7 +402,6 @@ def main() -> int:
     saved = 0
     skipped: list[tuple[str, str]] = []
     t_list: list[int] = []
-    t0 = time.time()
 
     for idx, (sid, question, img_paths) in enumerate(samples):
         safe_sid = re.sub(r"[^A-Za-z0-9._-]+", "_", str(sid))[:128]
@@ -451,19 +449,16 @@ def main() -> int:
             continue
 
         if (idx + 1) % 25 == 0:
-            elapsed = time.time() - t0
             print(
-                f"[progress] {idx+1}/{len(samples)} | rate={(idx+1)/max(elapsed,1e-6):.2f}/s "
-                f"| elapsed={elapsed:.1f}s | T_mean={np.mean(t_list):.2f} "
+                f"[progress] {idx+1}/{len(samples)} | T_mean={np.mean(t_list):.2f} "
                 f"| saved={saved} skipped={len(skipped)}",
                 flush=True,
             )
         torch.cuda.empty_cache()
 
-    elapsed = time.time() - t0
     print(
         f"[done] dataset={args.dataset} saved={saved}/{len(samples)} "
-        f"skipped={len(skipped)} elapsed={elapsed:.1f}s "
+        f"skipped={len(skipped)} "
         f"T_mean={np.mean(t_list) if t_list else 0:.2f}",
         flush=True,
     )
@@ -480,7 +475,6 @@ def main() -> int:
                 t_mean=float(np.mean(t_list)) if t_list else 0.0,
                 seed=args.seed,
                 max_new_tokens=args.max_new_tokens,
-                elapsed_seconds=elapsed,
             ),
             indent=2,
         )

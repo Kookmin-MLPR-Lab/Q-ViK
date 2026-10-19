@@ -9,7 +9,6 @@ import os
 import pickle
 import random
 import sys
-import time
 import traceback
 from pathlib import Path
 from typing import Any
@@ -418,7 +417,6 @@ def main() -> int:
     optimizer = torch.optim.AdamW(student.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     best_val = float("inf")
-    t0 = time.time()
     for epoch in range(args.epochs):
         student.train()
         train_loss = train_mse = train_rank = 0.0
@@ -450,7 +448,7 @@ def main() -> int:
                 print(
                     f"[epoch {epoch + 1}/{args.epochs} step {step}/{len(train_loader)}] "
                     f"loss={train_loss/train_seen:.6f} mse={train_mse/train_seen:.6f} "
-                    f"rank={train_rank/train_seen:.6f} elapsed={time.time()-t0:.1f}s",
+                    f"rank={train_rank/train_seen:.6f}",
                     flush=True,
                 )
 
@@ -487,7 +485,6 @@ def main() -> int:
         val_mse /= max(1, val_seen)
         val_rank /= max(1, val_seen)
 
-        elapsed = time.time() - t0
         record = {
             "epoch": epoch + 1,
             "train_loss": train_loss,
@@ -498,12 +495,11 @@ def main() -> int:
             "val_rank": val_rank,
             "train_seen": train_seen,
             "val_seen": val_seen,
-            "elapsed": elapsed,
         }
         print(
             f"[epoch {epoch + 1}] train_loss={train_loss:.6f} train_mse={train_mse:.6f} "
             f"train_rank={train_rank:.6f} | val_loss={val_loss:.6f} "
-            f"val_mse={val_mse:.6f} val_rank={val_rank:.6f} elapsed={elapsed:.1f}s",
+            f"val_mse={val_mse:.6f} val_rank={val_rank:.6f}",
             flush=True,
         )
         log_f.write(json.dumps(record) + "\n")
@@ -524,7 +520,7 @@ def main() -> int:
             print(f"[ckpt] saved best val_loss={best_val:.6f} to {out_dir}", flush=True)
 
     log_f.close()
-    print(f"[done] best_val={best_val:.6f} elapsed={time.time()-t0:.1f}s", flush=True)
+    print(f"[done] best_val={best_val:.6f}", flush=True)
     return 0
 
 

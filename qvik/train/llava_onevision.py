@@ -12,7 +12,6 @@ import argparse
 import json
 import random
 import sys
-import time
 import traceback
 from pathlib import Path
 
@@ -337,7 +336,6 @@ def main() -> int:
         return total_loss_val, total_mse / denom, total_rank / denom
 
     best_val = float("inf")
-    t0 = time.time()
     for epoch in range(args.epochs):
         student.train()
         train_loss = train_mse = train_rank = 0.0
@@ -359,7 +357,7 @@ def main() -> int:
                 print(
                     f"[epoch {epoch} step {step+1}/{len(train_loader)}] "
                     f"loss={train_loss/n_seen:.5f} mse={train_mse/n_seen:.5f} "
-                    f"rank={train_rank/n_seen:.5f} elapsed={time.time()-t0:.1f}s",
+                    f"rank={train_rank/n_seen:.5f}",
                     flush=True,
                 )
         train_loss /= max(1, n_seen)
@@ -389,11 +387,10 @@ def main() -> int:
         val_mse /= n_val_seen
         val_rank /= n_val_seen
 
-        elapsed = time.time() - t0
         print(
             f"[epoch {epoch}] train_loss={train_loss:.5f} train_mse={train_mse:.5f} "
             f"train_rank={train_rank:.5f} | val_loss={val_loss:.5f} val_mse={val_mse:.5f} "
-            f"val_rank={val_rank:.5f} elapsed={elapsed:.1f}s",
+            f"val_rank={val_rank:.5f}",
             flush=True,
         )
         log_f.write(
@@ -406,7 +403,6 @@ def main() -> int:
                     val_loss=val_loss,
                     val_mse=val_mse,
                     val_rank=val_rank,
-                    elapsed=elapsed,
                 )
             )
             + "\n"
@@ -419,7 +415,7 @@ def main() -> int:
             print(f"[ckpt] saved best (val_loss={val_loss:.5f}) to {out_dir}", flush=True)
 
     log_f.close()
-    print(f"[done] best_val={best_val:.5f} elapsed={time.time()-t0:.1f}s", flush=True)
+    print(f"[done] best_val={best_val:.5f}", flush=True)
     return 0
 
 
