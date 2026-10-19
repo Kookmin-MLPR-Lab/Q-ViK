@@ -157,7 +157,7 @@ class LmmsLlava15Student(lmms):
         student_path: str = str(ZAP_ROOT / "ckpts/qvik_student_llava15"),
         vision_tower_path: str = "",
         keep_ratio: float = 0.5,
-        keep_ratio_basis: str = "total",
+        keep_ratio_basis: str = "image",
         device: str = "cuda:0",
         device_map: str = "cuda:0",
         model_name: Optional[str] = None,
@@ -227,8 +227,9 @@ class LmmsLlava15Student(lmms):
         self.grid_h = int(grid_h)
         self.grid_w = int(grid_w)
         self.stats_output_dir = stats_output_dir
-        # "qvik" (default): first answer token from the compressed cache;
-        # "origin": first answer token from the full prefill (see prefill_mode.py).
+        # "origin" (default): first answer token from the full prefill;
+        # "qvik": delayed replay, first answer token from the compressed cache
+        # (see prefill_mode.py).
         self.prefill_mode = normalize_prefill_mode(prefill_mode)
         print(f"[lmms-llava15-student] prefill_mode={self.prefill_mode}", file=sys.stderr, flush=True)
         self._rank = 0

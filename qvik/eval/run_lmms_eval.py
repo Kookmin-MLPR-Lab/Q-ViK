@@ -82,9 +82,6 @@ def _on_disk(*candidates: tuple[str, str]) -> tuple[str, str]:
 
 
 _TEXTVQA = _on_disk(("parquet", "TextVQA/data/validation-*.parquet"), ("arrow", "textvqa_val/data-*.arrow"))
-_MMSTAR = _on_disk(("parquet", "MMStar/mmstar.parquet"), ("parquet", "MMStar/mmstar_lmms.parquet"))
-_SCIENCEQA_IMG = _on_disk(("parquet", "ScienceQA-IMG/test-*.parquet"), ("parquet", "ScienceQA/ScienceQA-IMG/test-*.parquet"))
-_MMBENCH_EN = _on_disk(("parquet", "MMBench-EN/dev-*.parquet"), ("parquet", "MMBench/en/dev-*.parquet"))
 LOCAL_TASKS = {
     "textvqa": {
         "base": "textvqa/textvqa_val.yaml",
@@ -130,111 +127,8 @@ LOCAL_TASKS = {
         "dataset_path": "parquet",
         "data_files": {"val": str(DATA_ROOT / "TextCaps/data/val-*.parquet")},
     },
-    "mme": {
-        "base": "mme/mme.yaml",
-        "dataset_path": "parquet",
-        "data_files": {"test": str(DATA_ROOT / "MME/data/*.parquet")},
-    },
-    "pope": {
-        "base": "pope/pope.yaml",
-        "dataset_path": "parquet",
-        "data_files": {"test": str(DATA_ROOT / "POPE/data/*.parquet")},
-    },
-    "mmstar": {
-        "base": "mmstar/mmstar.yaml",
-        "dataset_path": "parquet",
-        "data_files": {"val": _MMSTAR[1]},
-    },
-    "vizwiz_vqa": {
-        "base": "vizwiz_vqa/vizwiz_vqa_val.yaml",
-        "dataset_path": "parquet",
-        "data_files": {"val": str(DATA_ROOT / "VizWiz-VQA/data/val-*.parquet")},
-    },
-    "scienceqa_img": {
-        "base": "scienceqa/scienceqa_img.yaml",
-        "dataset_path": "parquet",
-        "dataset_name": "ScienceQA-IMG",
-        "data_files": {"test": _SCIENCEQA_IMG[1]},
-    },
-    "mmbench_en_dev": {
-        "base": "mmbench/mmbench_en_dev.yaml",
-        "dataset_path": "parquet",
-        "dataset_name": "en",
-        "data_files": {"dev": _MMBENCH_EN[1]},
-    },
 }
 
-
-# VQAv2 test-dev: 107,394 questions over 36 local parquet shards, no answer
-# labels (submission-only -> EvalAI test-dev phase). The wrapper is
-# single-process (world_size=1), so register 4 equal shard tasks alongside the
-# full one; run one shard per GPU and concatenate the per-shard submission JSONs.
-_VQAV2_N_SHARDS = 36
-# 12 sub-shards of 3 parquet files (~8.9k questions each) so a 4-GPU work queue
-# stays balanced even when one worker also has other tasks to get through.
-_VQAV2_SPLITS = 12
-
-
-def _vqav2_testdev_files(lo: int, hi: int) -> list[str]:
-    return [
-        str(DATA_ROOT / f"VQAv2/data/testdev-{i:05d}-of-{_VQAV2_N_SHARDS:05d}.parquet")
-        for i in range(lo, hi + 1)
-    ]
-
-
-def _vqav2_spec(lo: int, hi: int) -> dict:
-    return {
-        "base": "vqav2/vqav2_test.yaml",
-        "dataset_path": "parquet",
-        # upstream vqav2_test.yaml says `test_split: test`; our local files are
-        # the testdev split, so name the split honestly and override.
-        "data_files": {"testdev": _vqav2_testdev_files(lo, hi)},
-        "extra": {"test_split": "testdev"},
-    }
-
-
-LOCAL_TASKS["vqav2_testdev"] = _vqav2_spec(0, _VQAV2_N_SHARDS - 1)
-for _i in range(_VQAV2_SPLITS):
-    _per = _VQAV2_N_SHARDS // _VQAV2_SPLITS
-    LOCAL_TASKS[f"vqav2_testdev_s{_i}"] = _vqav2_spec(_i * _per, (_i + 1) * _per - 1)
-
-
-# VQAv2 *full test* (test2015): 447,793 questions over 143 local parquet shards.
-# EvalAI's VQA Challenge 2021 test-dev phase rejects a testdev-only file --
-# "you need to upload predictions on ALL test questions for test-dev evaluation"
-# -- and scores the test-dev subset server-side, so the full split is what has to
-# be generated even when only the test-dev number is wanted.
-_VQAV2_TEST_N_SHARDS = 143
-_VQAV2_TEST_SPLITS = 12
-
-
-def _even_groups(n_items: int, n_groups: int) -> list[tuple[int, int]]:
-    """Split range(n_items) into n_groups contiguous, near-equal (lo, hi) spans."""
-    base, extra = divmod(n_items, n_groups)
-    spans, lo = [], 0
-    for g in range(n_groups):
-        size = base + (1 if g < extra else 0)
-        spans.append((lo, lo + size - 1))
-        lo += size
-    return spans
-
-
-def _vqav2_test_spec(lo: int, hi: int) -> dict:
-    return {
-        "base": "vqav2/vqav2_test.yaml",
-        "dataset_path": "parquet",
-        "data_files": {
-            "test": [
-                str(DATA_ROOT / f"VQAv2/data/test-{i:05d}-of-{_VQAV2_TEST_N_SHARDS:05d}.parquet")
-                for i in range(lo, hi + 1)
-            ]
-        },
-    }
-
-
-LOCAL_TASKS["vqav2_test"] = _vqav2_test_spec(0, _VQAV2_TEST_N_SHARDS - 1)
-for _i, (_lo, _hi) in enumerate(_even_groups(_VQAV2_TEST_N_SHARDS, _VQAV2_TEST_SPLITS)):
-    LOCAL_TASKS[f"vqav2_test_s{_i}"] = _vqav2_test_spec(_lo, _hi)
 
 # lmms-eval ships built-in tasks with these same names; an --include_path task
 # can't override a built-in, so the generated YAML registers under a distinct

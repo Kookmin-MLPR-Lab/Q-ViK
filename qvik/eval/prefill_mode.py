@@ -1,14 +1,15 @@
 """How the first answer token is produced relative to Q-ViK visual KV eviction.
 
-`prefill_mode="qvik"` (default, every task): the prompt is prefilled without its
-final token, visual KVs are evicted, and the final prompt token is then fed
-through the compressed cache. The first answer token -- often the whole answer
-on short-answer / multiple-choice benchmarks -- therefore sees only the kept
+`prefill_mode="origin"` (default): the full prompt is prefilled, the first answer
+token is taken from that full-attention pass, and eviction happens afterwards, so
+every later token is decoded from the compressed cache.
+
+`prefill_mode="qvik"` (delayed replay, opt-in): the prompt is prefilled without
+its final token, visual KVs are evicted, and the final prompt token is then fed
+through the compressed cache, so the first answer token -- often the whole
+answer on short-answer / multiple-choice benchmarks -- also sees only the kept
 visual KVs. The final token is always a text token (the assistant-turn suffix),
 so image positions and eviction masks are unchanged.
-
-`prefill_mode="origin"`: the full prompt is prefilled, the first answer token is
-taken from that full-attention pass, and eviction happens afterwards.
 
 Shared by the LLaVA-1.5 and LLaVA-OneVision student wrappers.
 """
@@ -20,7 +21,7 @@ from typing import Any
 import torch
 
 PREFILL_MODES = ("qvik", "origin")
-DEFAULT_PREFILL_MODE = "qvik"
+DEFAULT_PREFILL_MODE = "origin"
 
 
 def normalize_prefill_mode(mode: str | None) -> str:

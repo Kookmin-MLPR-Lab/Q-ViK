@@ -30,9 +30,9 @@ conda activate qvik
 - [GQA](https://cs.stanford.edu/people/dorarad/gqa/)
 - [ChartQA](https://github.com/vis-nlp/ChartQA)
 - [DocVQA](https://www.docvqa.org/)
+- [COCO Caption](https://cocodataset.org/)
 - [NoCaps](https://nocaps.org/)
 - [TextCaps](https://textvqa.org/textcaps/)
-- [MileBench](https://milebench.github.io/)
 
 ## Data Structure
 
@@ -52,15 +52,7 @@ data/
     ├── DocVQA/DocVQA/
     ├── COCO-Caption2017/data/
     ├── NoCaps/data/
-    ├── TextCaps/data/
-    ├── POPE/data/
-    ├── MME/data/
-    ├── MMStar/mmstar_lmms.parquet    # (or MMStar/mmstar.parquet)
-    ├── VizWiz-VQA/data/
-    ├── ScienceQA/ScienceQA-IMG/      # (or ScienceQA-IMG/)
-    ├── MMBench/en/                   # (or MMBench-EN/)
-    ├── VQAv2/data/
-    └── MileBench/
+    └── TextCaps/data/
 ```
 
 ## Pipeline
@@ -113,9 +105,17 @@ python qvik/train/llava15.py \
 
 Results are written to `results/<model_tag>/keep<keep_ratio>/<task>/`
 (`model_tag` is `llava15_lmms` or `onevision_lmms`). Available tasks: `textvqa`,
-`chartqa`, `docvqa`, `gqa`, `coco_cap`, `nocaps`, `textcaps`, `pope`, `mme`,
-`mmstar`, `vizwiz_vqa`, `scienceqa_img`, `mmbench_en_dev`, `vqav2_testdev`,
-`vqav2_test` (and their shards `vqav2_testdev_s0`-`s11`, `vqav2_test_s0`-`s11`).
+`chartqa`, `docvqa`, `gqa`, `coco_cap`, `nocaps`, `textcaps`.
+
+`keep_ratio` is the fraction of image tokens kept (text KVs are never evicted)
+for both backbones. LLaVA-1.5 also accepts `keep_ratio_basis=total`, where the
+budget is `keep_ratio` x all prompt tokens (still evicting image tokens only).
+
+The first answer token comes from the full (uncompressed) prefill and eviction
+applies from the second token on (`prefill_mode=origin`, the default). Pass
+`prefill_mode=qvik` in `--model_args` for delayed replay, where the last prompt
+token is replayed through the compressed cache so the first answer token is
+also produced under eviction.
 
 **lmms-eval (LLaVA-1.5)** 
 ```bash
@@ -137,14 +137,4 @@ python qvik/eval/run_lmms_eval.py \
   --output_path results
 ```
 
-**MileBench (OneVision)**
-```bash
-for ds in ALFRED CLEVR-Change IEdit Spot-the-Diff; do
-  python qvik/eval/milebench_onevision_student.py \
-    --dataset $ds \
-    --pretrained model/llava-onevision-qwen2-7b-ov \
-    --student_path ckpts/qvik_student_onevision \
-    --keep_ratio 0.5
-done
-```
 

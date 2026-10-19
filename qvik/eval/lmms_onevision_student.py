@@ -74,8 +74,9 @@ class LmmsOnevisionStudent(lmms):
         self.student = self.student.to(device=self._device, dtype=torch.float16).eval()
         self.keep_ratio = float(keep_ratio)
         self.stats_output_dir = stats_output_dir
-        # "qvik" (default): first answer token from the compressed cache;
-        # "origin": first answer token from the full prefill (see prefill_mode.py).
+        # "origin" (default): first answer token from the full prefill;
+        # "qvik": delayed replay, first answer token from the compressed cache
+        # (see prefill_mode.py).
         self.prefill_mode = normalize_prefill_mode(prefill_mode)
         print(f"[lmms-onevision-student] prefill_mode={self.prefill_mode}", file=sys.stderr, flush=True)
         self._reported_keep_budget = False
@@ -369,7 +370,7 @@ class LmmsOnevisionStudent(lmms):
 
         # Score each layer as soon as its hidden state is produced. Asking
         # Qwen2 for output_hidden_states retains all 29 [T,H] tensors on GPU;
-        # the longest MileBench prompts cannot fit those together with the KV
+        # long multi-image prompts cannot fit those together with the KV
         # cache. Hooks retain only the small per-image-token student scores.
         layer_scores: dict[int, torch.Tensor] = {}
         hook_handles = []
@@ -395,7 +396,7 @@ class LmmsOnevisionStudent(lmms):
 
         # Prefill through the Qwen2 backbone. Calling the CausalLM wrapper here
         # materializes [prompt_len, vocab_size] logits even though only the last
-        # token is used, which OOMs on MileBench's longest prompts.
+        # token is used, which OOMs on long multi-image prompts.
         try:
             prefill = self._model.model(
                 inputs_embeds=inputs_embeds,
